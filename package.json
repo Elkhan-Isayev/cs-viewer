@@ -1,0 +1,39 @@
+{
+  "name": "cs-viewer",
+  "version": "1.0.0",
+  "description": "Third-person browser viewer for Counter-Strike 1.6 / GoldSrc demo (.dem) recordings",
+  "type": "module",
+  "scripts": {
+    "assets": "node scripts/extract-assets.mjs",
+    "sample": "mkdir -p public/demos && curl -fL --progress-bar -o public/demos/demo.dem https://github.com/Elkhan-Isayev/cs-viewer/releases/download/v1.0.0/de_inferno-sample.dem",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "check": "node --experimental-strip-types --no-warnings scripts/check-assets.mjs",
+    "inspect": "node --experimental-strip-types --no-warnings scripts/parse-demo.mjs",
+    "still": "node --experimental-strip-types --no-warnings scripts/render-preview.mjs"
+  },
+  "keywords": [
+    "counter-strike",
+    "goldsrc",
+    "demo",
+    "dem",
+    "hltv",
+    "replay",
+    "webgl"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/three": "^0.172.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11"
+  },
+  "dependencies": {
+    "three": "^0.172.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Elkhan-Isayev/cs-viewer.git"
+  },
+  "homepage": "https://github.com/Elkhan-Isayev/cs-viewer"
+}

@@ -1,0 +1,196 @@
+import * as THREE from 'three'
+import { buildMapScene, type BuiltMap } from '../bsp/scene.ts'
+import { parseBsp } from '../bsp/parser.ts'
+import { buildHull, traceLine, type Hull } from '../bsp/trace.ts'
+import { threeToQuake } from './coords.ts'
+import type { Replay, ReplayPlayer } from '../demo/replay.ts'
+import { CameraRig, type CameraMode } from './cameraRig.ts'
+import { createPose, ModelLibrary, PlayerActor, samplePlayer, type PlayerPose } from './players.ts'
+
+export interface ViewerOptions {
+  canvas: HTMLCanvasElement
+  assetBaseUrl: string
+}
+
+/**
+ * Renders a parsed replay: the map, the players, and a camera that can chase
+ * any of them in third person.
+ */
+export class Viewer {
+  readonly scene = new THREE.Scene()
+  readonly rig: CameraRig
+  private readonly renderer: THREE.WebGLRenderer
+  private readonly library: ModelLibrary
+  private readonly actors = new Map<number, PlayerActor>()
+  private readonly pose: PlayerPose = createPose()
+  private map: BuiltMap | null = null
+  private hull: Hull | null = null
+  private replay: Replay | null = null
+
+  /** Slot of the player the camera follows, or null for a free look. */
+  followSlot: number | null = null
+  showNameTags = true
+
+  private lastFrameAt = performance.now()
+  private running = false
+  private readonly options: ViewerOptions
+
+  constructor(options: ViewerOptions) {
+    this.options = options
+    this.renderer = new THREE.WebGLRenderer({
+      canvas: options.canvas,
+      antialias: true,
+      powerPreference: 'high-performance'
+    })
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace
+
+    this.scene.background = new THREE.Color(0x0b0e13)
+    this.scene.fog = new THREE.Fog(0x0b0e13, 3000, 9000)
+
+    // The map carries baked lighting; players need a little of their own so
+    // they do not read as silhouettes.
+    this.scene.add(new THREE.AmbientLight(0xffffff, 1.6))
+    const key = new THREE.DirectionalLight(0xffffff, 1.1)
+    key.position.set(0.4, 1, 0.25)
+    this.scene.add(key)
+
+    this.library = new ModelLibrary(options.assetBaseUrl)
+    this.rig = new CameraRig(this.aspect)
+    this.resize()
+  }
+
+  private get aspect(): number {
+    const { clientWidth, clientHeight } = this.options.canvas
+    return clientHeight > 0 ? clientWidth / clientHeight : 1
+  }
+
+  resize(): void {
+    const canvas = this.options.canvas
+    const width = canvas.clientWidth
+    const height = canvas.clientHeight
+    if (width === 0 || height === 0) return
+    this.renderer.setSize(width, height, false)
+    this.rig.resize(width / height)
+  }
+
+  async loadMap(mapName: string): Promise<void> {
+    const response = await fetch(`${this.options.assetBaseUrl}/maps/${mapName}.bsp`)
+    if (!response.ok) {
+      throw new Error(
+        `Map "${mapName}" is not in public/assets/maps. Run: npm run assets -- --map ${mapName}`
+      )
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    const bsp = parseBsp(bytes)
+
+    this.map?.dispose()
+    this.map = buildMapScene(bsp)
+    this.scene.add(this.map.root)
+
+    this.hull = buildHull(bytes)
+    this.rig.lineOfSight = this.hull
+      ? (from, to) => {
+          const start = threeToQuake(from.x, from.y, from.z)
+          const end = threeToQuake(to.x, to.y, to.z)
+          const result = traceLine(this.hull!, start, end)
+          // Starting inside solid means the player is clipped into geometry;
+          // pulling the camera all the way in would be worse than leaving it.
+          return result.startSolid ? 1 : result.fraction
+        }
+      : null
+
+    // Start the free camera somewhere sensible in case nobody is followed.
+    const centre = this.map.bounds.getCenter(new THREE.Vector3())
+    this.rig.freePosition.copy(centre).add(new THREE.Vector3(0, 400, 0))
+  }
+
+  setReplay(replay: Replay): void {
+    for (const actor of this.actors.values()) {
+      this.scene.remove(actor.root)
+      actor.dispose()
+    }
+    this.actors.clear()
+
+    this.replay = replay
+    for (const player of replay.players) {
+      const actor = new PlayerActor(player, this.library, replay)
+      this.actors.set(player.slot, actor)
+      this.scene.add(actor.root)
+    }
+    this.followSlot ??= replay.players[0]?.slot ?? null
+  }
+
+  setMode(mode: CameraMode): void {
+    if (mode === 'free' && this.rig.mode !== 'free') this.rig.detach()
+    this.rig.mode = mode
+  }
+
+  setBrightness(value: number): void {
+    this.map?.setBrightness(value)
+  }
+
+  /** Players present in the world at `time`, for the scoreboard. */
+  presentPlayers(time: number): { player: ReplayPlayer; team: number }[] {
+    if (!this.replay) return []
+    const out: { player: ReplayPlayer; team: number }[] = []
+    for (const actor of this.actors.values()) {
+      const pose = samplePlayer(actor.player, time, createPose())
+      if (!pose.present) continue
+      out.push({ player: actor.player, team: actor.teamAtTime(time, pose.modelIndex) })
+    }
+    return out
+  }
+
+  /** Draws one frame at replay time `time`. */
+  render(time: number): void {
+    const now = performance.now()
+    const delta = Math.min((now - this.lastFrameAt) / 1000, 0.1)
+    this.lastFrameAt = now
+
+    let followTarget: { position: THREE.Vector3; pitch: number; yaw: number } | null = null
+
+    for (const [slot, actor] of this.actors) {
+      const pose = samplePlayer(actor.player, time, this.pose)
+      actor.setLabelVisible(this.showNameTags && slot !== this.followSlot)
+      actor.update(pose, delta)
+
+      if (slot === this.followSlot && pose.present) {
+        followTarget = {
+          position: pose.position.clone(),
+          pitch: pose.pitch,
+          yaw: pose.yaw
+        }
+      }
+    }
+
+    // In eye mode the followed player's own model would fill the screen.
+    const followed = this.followSlot !== null ? this.actors.get(this.followSlot) : undefined
+    if (followed) followed.root.visible = followed.root.visible && this.rig.mode !== 'eye'
+
+    this.rig.update(followTarget)
+    this.renderer.render(this.scene, this.rig.camera)
+  }
+
+  start(getTime: () => number): void {
+    if (this.running) return
+    this.running = true
+    const loop = () => {
+      if (!this.running) return
+      this.render(getTime())
+      requestAnimationFrame(loop)
+    }
+    requestAnimationFrame(loop)
+  }
+
+  stop(): void {
+    this.running = false
+  }
+
+  dispose(): void {
+    this.stop()
+    this.map?.dispose()
+    for (const actor of this.actors.values()) actor.dispose()
+    this.renderer.dispose()
+  }
+}

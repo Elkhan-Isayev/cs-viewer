@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.DS_Store
+
+# Extracted Valve game content — never commit (copyright + size).
+# Regenerate with `npm run assets`.
+public/assets/
+
+# Demo recordings are large binaries. The sample match is published as a
+# release asset instead; fetch it with `npm run sample`.
+*.dem
+
+# Output of `npm run still`.
+preview.png
