@@ -3,6 +3,7 @@ import { buildMapScene, type BuiltMap } from '../bsp/scene.ts'
 import { parseBsp } from '../bsp/parser.ts'
 import { buildHull, traceLine, type Hull } from '../bsp/trace.ts'
 import { threeToQuake } from './coords.ts'
+import { buildSkybox, loadSkyFaces, type Skybox } from './skybox.ts'
 import type { Replay, ReplayPlayer } from '../demo/replay.ts'
 import { CameraRig, type CameraMode } from './cameraRig.ts'
 import { createPose, ModelLibrary, PlayerActor, samplePlayer, type PlayerPose } from './players.ts'
@@ -24,6 +25,7 @@ export class Viewer {
   private readonly actors = new Map<number, PlayerActor>()
   private readonly pose: PlayerPose = createPose()
   private map: BuiltMap | null = null
+  private sky: Skybox | null = null
   private hull: Hull | null = null
   private replay: Replay | null = null
 
@@ -87,6 +89,22 @@ export class Viewer {
     this.map?.dispose()
     this.map = buildMapScene(bsp)
     this.scene.add(this.map.root)
+
+    // The BSP's sky faces are skipped, so without a backdrop outdoor areas
+    // would show flat background where the sky should be.
+    this.sky?.dispose()
+    this.sky = null
+    const skyName = bsp.entities.find((entity) => entity.skyname)?.skyname
+    if (skyName) {
+      const faces = await loadSkyFaces(this.options.assetBaseUrl, skyName)
+      if (faces) {
+        this.sky = buildSkybox(faces)
+        if (this.sky) this.scene.add(this.sky.mesh)
+        else console.warn(`Skybox "${skyName}" could not be decoded`)
+      } else {
+        console.warn(`Skybox "${skyName}" is not in the extracted assets; run npm run assets`)
+      }
+    }
 
     this.hull = buildHull(bytes)
     this.rig.lineOfSight = this.hull
@@ -169,6 +187,8 @@ export class Viewer {
     if (followed) followed.root.visible = followed.root.visible && this.rig.mode !== 'eye'
 
     this.rig.update(followTarget)
+    // Keep the backdrop centred on the camera so it never moves relative to it.
+    if (this.sky) this.sky.mesh.position.copy(this.rig.camera.position)
     this.renderer.render(this.scene, this.rig.camera)
   }
 
@@ -190,6 +210,7 @@ export class Viewer {
   dispose(): void {
     this.stop()
     this.map?.dispose()
+    this.sky?.dispose()
     for (const actor of this.actors.values()) actor.dispose()
     this.renderer.dispose()
   }

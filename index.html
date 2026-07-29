@@ -4,98 +4,46 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CS Viewer — third-person demo playback</title>
+    <meta
+      name="description"
+      content="Watch a Counter-Strike 1.6 demo in third person, in the browser. Embeddable on any site."
+    />
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/src/style.css" />
+    <link rel="stylesheet" href="/src/page.css" />
   </head>
   <body>
-    <canvas id="viewport"></canvas>
+    <!-- The widget mounts here and renders into its own shadow root. -->
+    <div id="stage" hidden></div>
 
-    <div id="drop-hint" class="overlay">
+    <div id="start">
       <div class="panel">
         <h1>CS&nbsp;Viewer</h1>
-        <p class="lead">Watch a Counter-Strike 1.6 demo in third person, in the browser.</p>
+        <p class="lead">
+          Watch a Counter-Strike 1.6 demo in third person — the real map, the real player
+          models, in your browser.
+        </p>
+
         <label class="file-button">
           Choose a <code>.dem</code> file
           <input id="file-input" type="file" accept=".dem" hidden />
         </label>
         <p class="hint">…or drop one anywhere on this page.</p>
+
         <p id="bundled-row" class="hint" hidden>
-          <button id="bundled-button" class="link-button" type="button"></button>
+          <button id="bundled-button" class="link-button" type="button">
+            Play the bundled sample match
+          </button>
+        </p>
+
+        <p id="start-error" class="start-error" hidden></p>
+
+        <p class="footnote">
+          Embeddable on your own site —
+          <a href="https://github.com/Elkhan-Isayev/cs-viewer#embedding-it-on-your-own-site"
+            >see the docs</a
+          >.
         </p>
       </div>
-    </div>
-
-    <div id="loading" class="overlay" hidden>
-      <div class="panel">
-        <h2 id="loading-stage">Loading</h2>
-        <div class="progress"><div id="loading-bar"></div></div>
-        <p id="loading-detail" class="hint"></p>
-      </div>
-    </div>
-
-    <div id="error" class="overlay" hidden>
-      <div class="panel">
-        <h2>Could not play this demo</h2>
-        <p id="error-message" class="error-text"></p>
-        <button id="error-dismiss" class="link-button" type="button">Try another file</button>
-      </div>
-    </div>
-
-    <aside id="sidebar" hidden>
-      <header>
-        <div id="match-map">—</div>
-        <div id="match-server" class="hint"></div>
-      </header>
-      <div id="roster"></div>
-      <div id="feed-title" class="section-title">Recent kills</div>
-      <div id="feed"></div>
-    </aside>
-
-    <div id="hud" hidden>
-      <div id="round-banner"></div>
-    </div>
-
-    <footer id="controls" hidden>
-      <button id="play" class="icon-button" type="button" title="Play / pause (Space)">▶</button>
-      <span id="time" class="time">0:00</span>
-      <input id="scrubber" class="scrubber" type="range" min="0" max="1000" value="0" step="1" />
-      <span id="duration" class="time">0:00</span>
-
-      <label class="control">
-        Speed
-        <select id="speed">
-          <option value="0.25">0.25×</option>
-          <option value="0.5">0.5×</option>
-          <option value="1" selected>1×</option>
-          <option value="2">2×</option>
-          <option value="4">4×</option>
-          <option value="8">8×</option>
-        </select>
-      </label>
-
-      <label class="control">
-        View
-        <select id="mode">
-          <option value="third-person" selected>Third person</option>
-          <option value="eye">Player eyes</option>
-          <option value="free">Free camera</option>
-        </select>
-      </label>
-
-      <label class="control">
-        Follow
-        <select id="follow"></select>
-      </label>
-
-      <label class="control" title="Map lighting">
-        Light
-        <input id="brightness" type="range" min="0.4" max="2.5" step="0.05" value="1.1" />
-      </label>
-    </footer>
-
-    <div id="help" hidden>
-      <kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> ±5 s · <kbd>,</kbd><kbd>.</kbd> prev/next player ·
-      <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> view mode · drag to orbit · scroll to zoom · <kbd>WASD</kbd> in free camera
     </div>
 
     <script type="module" src="/src/main.ts"></script>

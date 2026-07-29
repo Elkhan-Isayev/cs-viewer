@@ -1,12 +1,13 @@
 /**
- * Renders a still frame of the replay without a GPU.
+ * Renders a still frame of a replay without a GPU.
  *
- * It drives the real camera rig, map geometry and studio skinning, then
- * rasterises the result into a PNG. That makes it possible to verify the
- * third-person view — coordinate conversion, camera placement, model posing —
- * from the command line or CI, where WebGL is not available.
+ * It drives the real camera rig, map geometry, lightmaps and studio skinning,
+ * then rasterises the result into a PNG — perspective-correct, textured, and
+ * lit the same way the WebGL shader lights it. That makes the third-person
+ * view verifiable from a terminal or CI, where WebGL is not available.
  *
- *   node --experimental-strip-types scripts/render-preview.mjs [--time 600] [--player 3] [--out preview.png]
+ *   node --experimental-strip-types scripts/render-preview.mjs \
+ *        [--time 2400] [--player 7] [--mode third-person] [--out preview.png]
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
@@ -14,13 +15,14 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as THREE from 'three'
 import { parseBsp } from '../src/bsp/parser.ts'
-import { buildHull, traceLine } from '../src/bsp/trace.ts'
-import { threeToQuake } from '../src/render/coords.ts'
 import { buildMapScene } from '../src/bsp/scene.ts'
+import { buildHull, traceLine } from '../src/bsp/trace.ts'
 import { buildStudioModel, StudioInstance } from '../src/mdl/model.ts'
 import { parseReplay } from '../src/demo/replay.ts'
 import { CameraRig } from '../src/render/cameraRig.ts'
 import { samplePlayer, createPose } from '../src/render/players.ts'
+import { threeToQuake } from '../src/render/coords.ts'
+import { buildSkybox } from '../src/render/skybox.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const assets = join(root, 'public', 'assets')
@@ -31,15 +33,20 @@ const option = (flag, fallback) => {
   return i >= 0 ? args[i + 1] : fallback
 }
 
-const WIDTH = Number(option('--width', 960))
-const HEIGHT = Number(option('--height', 540))
-const TIME = Number(option('--time', 600))
+const WIDTH = Number(option('--width', 1280))
+const HEIGHT = Number(option('--height', 720))
+const TIME = Number(option('--time', 2400))
 const MODE = option('--mode', 'third-person')
+const DISTANCE = Number(option('--distance', 0)) || null
+const ORBIT = Number(option('--orbit', 0))
 const OUT = option('--out', join(root, 'preview.png'))
+const BRIGHTNESS = Number(option('--brightness', 1.1))
+/** Tints the followed player, to make it obvious who the camera is on. */
+const HIGHLIGHT = args.includes('--highlight')
 
 const demoPath = option('--demo', join(root, 'public', 'demos', 'demo.dem'))
 if (!existsSync(demoPath)) {
-  console.error(`No demo at ${demoPath}`)
+  console.error(`No demo at ${demoPath} — run: npm run sample`)
   process.exit(1)
 }
 
@@ -83,11 +90,25 @@ console.log(
 const rig = new CameraRig(WIDTH / HEIGHT)
 rig.mode = MODE
 rig.smoothing = 1
+if (DISTANCE) rig.distance = DISTANCE
+rig.orbitYaw = ORBIT
 if (hull) {
   rig.lineOfSight = (from, to) => {
     const result = traceLine(hull, threeToQuake(from.x, from.y, from.z), threeToQuake(to.x, to.y, to.z))
     return result.startSolid ? 1 : result.fraction
   }
+}
+// Free mode can be aimed explicitly, which is how sky and framing get checked.
+if (MODE === 'free') {
+  const at = option('--at', null)
+  rig.freePosition.copy(pose.position)
+  if (at) {
+    const [x, y, z] = at.split(',').map(Number)
+    rig.freePosition.set(x, y, z)
+  }
+  rig.freePosition.y += Number(option('--height-offset', 60))
+  rig.freeYaw = THREE.MathUtils.degToRad(Number(option('--yaw', 0)))
+  rig.freePitch = THREE.MathUtils.degToRad(Number(option('--pitch', 0)))
 }
 rig.update({ position: pose.position.clone(), pitch: pose.pitch, yaw: pose.yaw }, true)
 rig.camera.updateMatrixWorld(true)
@@ -97,110 +118,289 @@ const viewProjection = new THREE.Matrix4().multiplyMatrices(
   rig.camera.matrixWorldInverse
 )
 
-// --- software rasteriser --------------------------------------------------
+// --- framebuffer ----------------------------------------------------------
 
-const colorBuffer = new Uint8Array(WIDTH * HEIGHT * 3)
-const depthBuffer = new Float32Array(WIDTH * HEIGHT).fill(Infinity)
+const pixels = new Float32Array(WIDTH * HEIGHT * 3)
+const depth = new Float32Array(WIDTH * HEIGHT).fill(Infinity)
 for (let i = 0; i < WIDTH * HEIGHT; i++) {
-  colorBuffer[i * 3] = 12
-  colorBuffer[i * 3 + 1] = 15
-  colorBuffer[i * 3 + 2] = 21
+  pixels[i * 3] = 0.02
+  pixels[i * 3 + 1] = 0.025
+  pixels[i * 3 + 2] = 0.035
 }
 
-const clip = new THREE.Vector4()
+// three treats textures as sRGB and does the maths in linear space; matching
+// that is what makes this look like the real render rather than a washed-out
+// approximation.
+const SRGB_TO_LINEAR = new Float32Array(256)
+for (let i = 0; i < 256; i++) {
+  const c = i / 255
+  SRGB_TO_LINEAR[i] = c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+}
+const linearToSrgb = (c) => (c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055)
 
-/** Projects a world-space point to screen space; returns null when behind the camera. */
-function project(x, y, z) {
-  clip.set(x, y, z, 1).applyMatrix4(viewProjection)
-  if (clip.w <= 0.0001) return null
-  const inverseW = 1 / clip.w
-  return {
-    x: (clip.x * inverseW * 0.5 + 0.5) * WIDTH,
-    y: (1 - (clip.y * inverseW * 0.5 + 0.5)) * HEIGHT,
-    depth: clip.w
+/** Wrapping nearest-neighbour fetch from a three.js DataTexture. */
+function sampler(texture) {
+  const image = texture?.image
+  if (!image?.data) return null
+  const { data, width, height } = image
+  return (u, v, out) => {
+    let x = Math.floor(u * width) % width
+    let y = Math.floor(v * height) % height
+    if (x < 0) x += width
+    if (y < 0) y += height
+    const at = (y * width + x) * 4
+    out[0] = SRGB_TO_LINEAR[data[at]]
+    out[1] = SRGB_TO_LINEAR[data[at + 1]]
+    out[2] = SRGB_TO_LINEAR[data[at + 2]]
+    out[3] = data[at + 3] / 255
+    return out
   }
 }
 
-function rasterize(a, b, c, r, g, bl) {
-  const minX = Math.max(0, Math.floor(Math.min(a.x, b.x, c.x)))
-  const maxX = Math.min(WIDTH - 1, Math.ceil(Math.max(a.x, b.x, c.x)))
-  const minY = Math.max(0, Math.floor(Math.min(a.y, b.y, c.y)))
-  const maxY = Math.min(HEIGHT - 1, Math.ceil(Math.max(a.y, b.y, c.y)))
+const scratchClip = new THREE.Vector4()
+const NEAR_W = 0.05
+
+/** Transforms a world point into clip space. */
+function toClip(x, y, z) {
+  scratchClip.set(x, y, z, 1).applyMatrix4(viewProjection)
+  return { x: scratchClip.x, y: scratchClip.y, z: scratchClip.z, w: scratchClip.w }
+}
+
+/** Perspective divide to pixel coordinates. */
+function toScreen(c) {
+  const invW = 1 / c.w
+  return {
+    x: (c.x * invW * 0.5 + 0.5) * WIDTH,
+    y: (1 - (c.y * invW * 0.5 + 0.5)) * HEIGHT,
+    invW
+  }
+}
+
+const ATTRIBUTE_SIZE = 5
+
+function lerpVertex(a, b, t) {
+  const attr = new Float32Array(ATTRIBUTE_SIZE)
+  for (let i = 0; i < ATTRIBUTE_SIZE; i++) attr[i] = a.attr[i] + (b.attr[i] - a.attr[i]) * t
+  return {
+    clip: {
+      x: a.clip.x + (b.clip.x - a.clip.x) * t,
+      y: a.clip.y + (b.clip.y - a.clip.y) * t,
+      z: a.clip.z + (b.clip.z - a.clip.z) * t,
+      w: a.clip.w + (b.clip.w - a.clip.w) * t
+    },
+    attr
+  }
+}
+
+/**
+ * Clips a triangle against the near plane and rasterises what survives.
+ *
+ * Without this, any triangle with a vertex behind the camera is dropped
+ * whole — which punches holes in nearby walls and makes a camera-centred
+ * skybox disappear entirely.
+ */
+function emitTriangle(vertices, diffuse, lightmap, tint, depthOverride) {
+  let polygon = vertices
+  const inside = polygon.filter((v) => v.clip.w >= NEAR_W)
+  if (inside.length === 0) return 0
+  if (inside.length !== polygon.length) {
+    const clipped = []
+    for (let i = 0; i < polygon.length; i++) {
+      const current = polygon[i]
+      const next = polygon[(i + 1) % polygon.length]
+      const currentIn = current.clip.w >= NEAR_W
+      const nextIn = next.clip.w >= NEAR_W
+      if (currentIn) clipped.push(current)
+      if (currentIn !== nextIn) {
+        const t = (NEAR_W - current.clip.w) / (next.clip.w - current.clip.w)
+        clipped.push(lerpVertex(current, next, t))
+      }
+    }
+    polygon = clipped
+    if (polygon.length < 3) return 0
+  }
+
+  const screen = polygon.map((v) => toScreen(v.clip))
+  let drawn = 0
+  for (let i = 1; i < polygon.length - 1; i++) {
+    fillTriangle(
+      screen[0], screen[i], screen[i + 1],
+      polygon[0].attr, polygon[i].attr, polygon[i + 1].attr,
+      diffuse, lightmap, tint, depthOverride
+    )
+    drawn++
+  }
+  return drawn
+}
+
+const albedo = new Float32Array(4)
+const light = new Float32Array(4)
+
+/**
+ * Fills one triangle. `attributes` holds per-vertex [u, v, lu, lv, shade];
+ * everything is interpolated with a 1/w weight so textures do not swim.
+ */
+function fillTriangle(p0, p1, p2, a0, a1, a2, diffuse, lightmap, tint, depthOverride) {
+  const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x)))
+  const maxX = Math.min(WIDTH - 1, Math.ceil(Math.max(p0.x, p1.x, p2.x)))
+  const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y)))
+  const maxY = Math.min(HEIGHT - 1, Math.ceil(Math.max(p0.y, p1.y, p2.y)))
   if (minX > maxX || minY > maxY) return
 
-  const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+  const area = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x)
   if (Math.abs(area) < 1e-9) return
+  const inverseArea = 1 / area
 
   for (let y = minY; y <= maxY; y++) {
     for (let x = minX; x <= maxX; x++) {
       const px = x + 0.5
       const py = y + 0.5
-      const w0 = ((b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)) / area
-      const w1 = ((c.x - b.x) * (py - b.y) - (c.y - b.y) * (px - b.x)) / area
-      const w2 = 1 - w0 - w1
-      // Barycentric coverage test, accepting either winding.
-      if (w0 < 0 || w1 < 0 || w2 < 0) continue
+      let w0 = ((p1.x - px) * (p2.y - py) - (p1.y - py) * (p2.x - px)) * inverseArea
+      let w1 = ((p2.x - px) * (p0.y - py) - (p2.y - py) * (p0.x - px)) * inverseArea
+      let w2 = 1 - w0 - w1
+      // Accept either winding: demos are viewed from both sides of a face.
+      if (w0 < 0 || w1 < 0 || w2 < 0) {
+        if (w0 > 0 || w1 > 0 || w2 > 0) continue
+        w0 = -w0
+        w1 = -w1
+        w2 = -w2
+        const sum = w0 + w1 + w2
+        w0 /= sum
+        w1 /= sum
+        w2 /= sum
+      }
 
-      const depth = a.depth * w1 + b.depth * w2 + c.depth * w0
+      const invW = w0 * p0.invW + w1 * p1.invW + w2 * p2.invW
+      const z = depthOverride ?? 1 / invW
       const index = y * WIDTH + x
-      if (depth >= depthBuffer[index]) continue
-      depthBuffer[index] = depth
-      colorBuffer[index * 3] = r
-      colorBuffer[index * 3 + 1] = g
-      colorBuffer[index * 3 + 2] = bl
+      if (z >= depth[index]) continue
+
+      const b0 = (w0 * p0.invW) / invW
+      const b1 = (w1 * p1.invW) / invW
+      const b2 = (w2 * p2.invW) / invW
+
+      const u = a0[0] * b0 + a1[0] * b1 + a2[0] * b2
+      const v = a0[1] * b0 + a1[1] * b1 + a2[1] * b2
+      if (!diffuse) continue
+      diffuse(u, v, albedo)
+      if (albedo[3] < 0.5) continue // masked texture
+
+      let r = albedo[0]
+      let g = albedo[1]
+      let b = albedo[2]
+
+      if (lightmap) {
+        const lu = a0[2] * b0 + a1[2] * b1 + a2[2] * b2
+        const lv = a0[3] * b0 + a1[3] * b1 + a2[3] * b2
+        lightmap(lu, lv, light)
+        // The world shader multiplies by the lightmap with GoldSrc's overbright.
+        r *= light[0] * 2 * BRIGHTNESS
+        g *= light[1] * 2 * BRIGHTNESS
+        b *= light[2] * 2 * BRIGHTNESS
+      } else {
+        const shade = a0[4] * b0 + a1[4] * b1 + a2[4] * b2
+        r *= shade
+        g *= shade
+        b *= shade
+      }
+
+      if (tint) {
+        r = r * 0.55 + tint[0] * 0.45 * (r + 0.15)
+        g = g * 0.55 + tint[1] * 0.45 * (g + 0.15)
+        b = b * 0.55 + tint[2] * 0.45 * (b + 0.15)
+      }
+
+      depth[index] = z
+      pixels[index * 3] = r
+      pixels[index * 3 + 1] = g
+      pixels[index * 3 + 2] = b
     }
   }
 }
 
-/** Average colour of a texture, used as flat shading for the preview. */
-function averageColor(pixels) {
-  let r = 0
-  let g = 0
-  let b = 0
-  let n = 0
-  for (let i = 0; i < pixels.length; i += 4 * 16) {
-    if (pixels[i + 3] === 0) continue
-    r += pixels[i]
-    g += pixels[i + 1]
-    b += pixels[i + 2]
-    n++
+// --- skybox ---------------------------------------------------------------
+// Drawn first at an effectively infinite depth, so real geometry overwrites it.
+
+const bspEntities = parseBsp(bspBytes).entities
+const skyName = bspEntities.find((entity) => entity.skyname)?.skyname
+if (skyName) {
+  const faces = {}
+  for (const side of ['rt', 'lf', 'ft', 'bk', 'up', 'dn']) {
+    for (const extension of ['tga', 'bmp']) {
+      const file = join(assets, 'env', `${skyName}${side}.${extension}`)
+      if (existsSync(file)) {
+        faces[side] = new Uint8Array(readFileSync(file))
+        break
+      }
+    }
   }
-  return n ? [r / n, g / n, b / n] : [128, 128, 128]
+  const sky = Object.keys(faces).length === 6 ? buildSkybox(faces) : null
+  if (sky) {
+    sky.mesh.position.copy(rig.camera.position)
+    sky.mesh.updateMatrixWorld(true)
+
+    const geometry = sky.mesh.geometry
+    const position = geometry.getAttribute('position')
+    const uv = geometry.getAttribute('uv')
+    const index = geometry.getIndex()
+    const world = new THREE.Vector3()
+    let skyTriangles = 0
+
+    for (const group of geometry.groups) {
+      const diffuse = sampler(sky.mesh.material[group.materialIndex]?.map)
+      if (!diffuse) continue
+      for (let i = group.start; i + 2 < group.start + group.count; i += 3) {
+        const vertices = []
+        for (let k = 0; k < 3; k++) {
+          const v = index.getX(i + k)
+          world.set(position.getX(v), position.getY(v), position.getZ(v)).applyMatrix4(sky.mesh.matrixWorld)
+          const attr = new Float32Array(5)
+          attr[0] = uv.getX(v)
+          attr[1] = uv.getY(v)
+          attr[4] = 1
+          vertices.push({ clip: toClip(world.x, world.y, world.z), attr })
+        }
+        skyTriangles += emitTriangle(vertices, diffuse, null, null, 1e9)
+      }
+    }
+    console.log(`Skybox "${skyName}": ${skyTriangles} triangles`)
+  } else {
+    console.log(`Skybox "${skyName}": not available`)
+  }
 }
+
+// --- map ------------------------------------------------------------------
 
 console.log('Rasterising map…')
 let mapTriangles = 0
 map.root.traverse((object) => {
   if (!(object instanceof THREE.Mesh)) return
-  const position = object.geometry.getAttribute('position')
-  const index = object.geometry.getIndex()
-  if (!index) return
+  const geometry = object.geometry
+  const position = geometry.getAttribute('position')
+  const uv = geometry.getAttribute('uv')
+  const lightmapUv = geometry.getAttribute('lightmapUv')
+  const index = geometry.getIndex()
+  if (!index || !uv || !lightmapUv) return
 
-  const material = object.material
-  const texture = material.uniforms?.diffuseMap?.value
-  const [tr, tg, tb] = texture?.image?.data ? averageColor(texture.image.data) : [130, 130, 130]
+  const diffuse = sampler(object.material.uniforms?.diffuseMap?.value)
+  const lightmap = sampler(object.material.uniforms?.lightmap?.value)
+  if (!diffuse) return
 
   for (let i = 0; i < index.count; i += 3) {
-    const points = []
-    let visible = true
+    const vertices = []
     for (let k = 0; k < 3; k++) {
       const v = index.getX(i + k)
-      const p = project(position.getX(v), position.getY(v), position.getZ(v))
-      if (!p) {
-        visible = false
-        break
-      }
-      points.push(p)
+      const attr = new Float32Array(5)
+      attr[0] = uv.getX(v)
+      attr[1] = uv.getY(v)
+      attr[2] = lightmapUv.getX(v)
+      attr[3] = lightmapUv.getY(v)
+      vertices.push({ clip: toClip(position.getX(v), position.getY(v), position.getZ(v)), attr })
     }
-    if (!visible) continue
-
-    // Cheap facing-based shading so surfaces are distinguishable.
-    const shade = 0.55 + 0.45 * Math.min(1, 900 / Math.max(points[0].depth, 1))
-    rasterize(points[0], points[1], points[2], tr * shade, tg * shade, tb * shade)
-    mapTriangles++
+    mapTriangles += emitTriangle(vertices, diffuse, lightmap, null, null)
   }
 })
-console.log(`  ${mapTriangles.toLocaleString()} map triangles drawn`)
+console.log(`  ${mapTriangles.toLocaleString()} map triangles`)
 
 // --- players --------------------------------------------------------------
 
@@ -215,6 +415,7 @@ function loadModel(path) {
 
 const QUAKE_TO_THREE = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2)
 const UP_Z = new THREE.Vector3(0, 0, 1)
+const KEY_LIGHT = new THREE.Vector3(0.4, 1, 0.25).normalize()
 
 console.log('Rasterising players…')
 let playerTriangles = 0
@@ -238,7 +439,6 @@ for (const player of replay.players) {
 
   const holder = new THREE.Group()
   holder.position.copy(p.position)
-  holder.quaternion.copy(QUAKE_TO_THREE).clone()
   holder.quaternion
     .copy(QUAKE_TO_THREE)
     .multiply(new THREE.Quaternion().setFromAxisAngle(UP_Z, THREE.MathUtils.degToRad(p.yaw)))
@@ -248,49 +448,82 @@ for (const player of replay.players) {
   // CPU skinning: studio vertices live in their bone's local frame.
   const geometry = data.geometry
   const position = geometry.getAttribute('position')
+  const normal = geometry.getAttribute('normal')
+  const uv = geometry.getAttribute('uv')
   const skinIndex = geometry.getAttribute('skinIndex')
   const bones = instance.mesh.skeleton.bones
+
   const world = new THREE.Vector3()
-  const screen = []
+  const worldNormal = new THREE.Vector3()
+  const clips = new Array(position.count)
+  const shades = new Float32Array(position.count)
+
   for (let v = 0; v < position.count; v++) {
     const bone = bones[skinIndex.getX(v)]
     world.set(position.getX(v), position.getY(v), position.getZ(v))
-    if (bone) world.applyMatrix4(bone.matrixWorld)
-    screen.push(project(world.x, world.y, world.z))
+    worldNormal.set(normal.getX(v), normal.getY(v), normal.getZ(v))
+    if (bone) {
+      world.applyMatrix4(bone.matrixWorld)
+      worldNormal.transformDirection(bone.matrixWorld)
+    }
+    clips[v] = toClip(world.x, world.y, world.z)
+    // Matches the scene's ambient + single directional light.
+    shades[v] = 0.62 + 0.45 * Math.max(worldNormal.dot(KEY_LIGHT), 0)
   }
 
-  const isSubject = player.slot === subject.slot
-  const tint = isSubject ? [255, 210, 90] : [225, 120, 70]
-  for (let i = 0; i + 2 < position.count; i += 3) {
-    const a = screen[i]
-    const b = screen[i + 1]
-    const c = screen[i + 2]
-    if (!a || !b || !c) continue
-    rasterize(a, b, c, tint[0], tint[1], tint[2])
-    playerTriangles++
+  const groups = geometry.groups.length
+    ? geometry.groups
+    : [{ start: 0, count: position.count, materialIndex: 0 }]
+
+  const tint = HIGHLIGHT && player.slot === subject.slot ? [1.0, 0.78, 0.3] : null
+
+  for (const group of groups) {
+    const material = data.materials[group.materialIndex] ?? data.materials[0]
+    const diffuse = sampler(material?.map)
+    if (!diffuse) continue
+
+    for (let i = group.start; i + 2 < group.start + group.count; i += 3) {
+      const vertices = []
+      for (let k = 0; k < 3; k++) {
+        const attr = new Float32Array(5)
+        attr[0] = uv.getX(i + k)
+        attr[1] = uv.getY(i + k)
+        attr[4] = shades[i + k]
+        vertices.push({ clip: clips[i + k], attr })
+      }
+      playerTriangles += emitTriangle(vertices, diffuse, null, tint, null)
+    }
   }
   drawnPlayers++
 }
-console.log(`  ${drawnPlayers} players, ${playerTriangles.toLocaleString()} triangles drawn`)
+console.log(`  ${drawnPlayers} players, ${playerTriangles.toLocaleString()} triangles`)
 
 // --- PNG ------------------------------------------------------------------
 
-function writePng(path, width, height, rgb) {
+const rgb = new Uint8Array(WIDTH * HEIGHT * 3)
+for (let i = 0; i < WIDTH * HEIGHT * 3; i++) {
+  rgb[i] = Math.max(0, Math.min(255, Math.round(linearToSrgb(Math.min(pixels[i], 1)) * 255)))
+}
+
+/** Lazily built CRC table; declared before use so it is not in the TDZ. */
+let crcTable = null
+
+writePng(OUT, WIDTH, HEIGHT, rgb)
+console.log(`\nWrote ${OUT}`)
+
+function writePng(path, width, height, data) {
   const raw = Buffer.alloc((width * 3 + 1) * height)
   for (let y = 0; y < height; y++) {
     raw[y * (width * 3 + 1)] = 0 // filter type: none
-    Buffer.from(rgb.buffer, rgb.byteOffset + y * width * 3, width * 3).copy(
-      raw,
-      y * (width * 3 + 1) + 1
-    )
+    Buffer.from(data.buffer, data.byteOffset + y * width * 3, width * 3).copy(raw, y * (width * 3 + 1) + 1)
   }
 
-  const chunk = (type, data) => {
-    const out = Buffer.alloc(data.length + 12)
-    out.writeUInt32BE(data.length, 0)
+  const chunk = (type, payload) => {
+    const out = Buffer.alloc(payload.length + 12)
+    out.writeUInt32BE(payload.length, 0)
     out.write(type, 4, 'latin1')
-    data.copy(out, 8)
-    out.writeInt32BE(crc32(out.subarray(4, 8 + data.length)), 8 + data.length)
+    payload.copy(out, 8)
+    out.writeInt32BE(crc32(out.subarray(4, 8 + payload.length)), 8 + payload.length)
     return out
   }
 
@@ -305,13 +538,12 @@ function writePng(path, width, height, rgb) {
     Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
       chunk('IHDR', header),
-      chunk('IDAT', deflateSync(raw)),
+      chunk('IDAT', deflateSync(raw, { level: 9 })),
       chunk('IEND', Buffer.alloc(0))
     ])
   )
 }
 
-let crcTable = null
 function crc32(buffer) {
   if (!crcTable) {
     crcTable = new Int32Array(256)
@@ -325,6 +557,3 @@ function crc32(buffer) {
   for (let i = 0; i < buffer.length; i++) crc = crcTable[(crc ^ buffer[i]) & 0xff] ^ (crc >>> 8)
   return crc ^ -1
 }
-
-writePng(OUT, WIDTH, HEIGHT, colorBuffer)
-console.log(`\nWrote ${OUT}`)

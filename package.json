@@ -11,7 +11,9 @@
     "preview": "vite preview",
     "check": "node --experimental-strip-types --no-warnings scripts/check-assets.mjs",
     "inspect": "node --experimental-strip-types --no-warnings scripts/parse-demo.mjs",
-    "still": "node --experimental-strip-types --no-warnings scripts/render-preview.mjs"
+    "still": "node --experimental-strip-types --no-warnings scripts/render-preview.mjs",
+    "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
+    "build:all": "npm run build && npm run build:lib"
   },
   "keywords": [
     "counter-strike",
@@ -35,5 +37,22 @@
     "type": "git",
     "url": "git+https://github.com/Elkhan-Isayev/cs-viewer.git"
   },
-  "homepage": "https://github.com/Elkhan-Isayev/cs-viewer"
+  "homepage": "https://github.com/Elkhan-Isayev/cs-viewer",
+  "main": "dist-lib/cs-viewer.umd.cjs",
+  "module": "dist-lib/cs-viewer.js",
+  "types": "dist-lib/types/embed/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist-lib/types/embed/index.d.ts",
+      "import": "./dist-lib/cs-viewer.js",
+      "require": "./dist-lib/cs-viewer.umd.cjs"
+    }
+  },
+  "files": [
+    "dist-lib",
+    "scripts",
+    "src",
+    "README.md",
+    "LICENSE"
+  ]
 }

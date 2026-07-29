@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CS Viewer — embedding example</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 32px 20px 64px;
+        background: #12151b;
+        color: #e8ecf2;
+        font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { max-width: 900px; margin: 0 auto; }
+      h1 { font-size: 26px; margin: 0 0 4px; }
+      h2 { font-size: 17px; margin: 40px 0 8px; }
+      p { color: #a8b2c0; }
+      code { background: #1d2230; border-radius: 4px; padding: 1px 5px; font-size: 13px; }
+      pre {
+        background: #1a1e28;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 14px 16px;
+        overflow-x: auto;
+        font-size: 13px;
+      }
+
+      /* The only requirement: give the mount point a height. */
+      .replay {
+        height: 540px;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+      .replay.small { height: 320px; }
+
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+      button {
+        padding: 7px 13px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 7px;
+        background: #1d2230;
+        color: #e8ecf2;
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover { background: #262c3c; }
+      #status { color: #f0a63c; font-size: 13px; min-height: 1.4em; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Embedding CS Viewer</h1>
+      <p>
+        Two ways to put a third-person replay on a page. Both need the game assets served
+        somewhere (<code>maps/</code> and <code>models/</code>) — see the README.
+      </p>
+
+      <h2>1. No JavaScript — just markup</h2>
+      <p>
+        Give an element <code>data-cs-viewer</code>, point it at a demo, and call
+        <code>autoMount()</code> once.
+      </p>
+      <pre>&lt;div data-cs-viewer
+     data-demo="/demos/demo.dem"
+     data-assets="/assets"
+     style="height: 540px"&gt;&lt;/div&gt;
+
+&lt;script type="module"&gt;
+  import { autoMount } from '/dist-lib/cs-viewer.js'
+  autoMount()
+&lt;/script&gt;</pre>
+
+      <div
+        class="replay"
+        data-cs-viewer
+        data-demo="/demos/demo.dem"
+        data-assets="/assets"
+        data-follow="7"
+      ></div>
+
+      <h2>2. With the API</h2>
+      <p>
+        <code>createCsViewer</code> returns a handle you can drive from your own controls —
+        useful for linking a replay to a timeline, a scoreboard or an article.
+      </p>
+      <pre>import { createCsViewer } from '/dist-lib/cs-viewer.js'
+
+const viewer = createCsViewer('#replay', {
+  demo: '/demos/demo.dem',
+  assets: '/assets',
+  mode: 'third-person',
+  controls: false,     // drive it yourself
+  roster: false
+})
+
+viewer.on('ready', (match) =&gt; console.log(match.mapName, match.players))
+viewer.seek(1200)
+viewer.follow(5)</pre>
+
+      <div id="replay" class="replay small"></div>
+      <div class="row">
+        <button data-action="toggle">Play / pause</button>
+        <button data-action="round">Jump to 20:00</button>
+        <button data-action="next">Next player</button>
+        <button data-action="eye">Player eyes</button>
+        <button data-action="third">Third person</button>
+        <button data-action="free">Free camera</button>
+      </div>
+      <p id="status">Loading…</p>
+    </main>
+
+    <script type="module">
+      import { autoMount, createCsViewer } from '/dist-lib/cs-viewer.js'
+
+      autoMount()
+
+      const viewer = createCsViewer('#replay', {
+        demo: '/demos/demo.dem',
+        assets: '/assets',
+        autoplay: false,
+        startTime: 2400,
+        controls: false,
+        roster: false
+      })
+
+      const status = document.getElementById('status')
+      let players = []
+      let at = 0
+
+      viewer.on('ready', (match) => {
+        players = match.players
+        status.textContent = `${match.mapName} — ${match.players.length} players, ${match.kills} kills`
+      })
+      viewer.on('error', (error) => {
+        status.textContent = `Failed: ${error.message}`
+      })
+
+      document.querySelector('.row').addEventListener('click', (event) => {
+        const action = event.target.dataset?.action
+        if (!action) return
+        if (action === 'toggle') viewer.toggle()
+        if (action === 'round') viewer.seek(1200)
+        if (action === 'next' && players.length) {
+          at = (at + 1) % players.length
+          viewer.follow(players[at].slot)
+          status.textContent = `Following ${players[at].name}`
+        }
+        if (action === 'eye') viewer.setMode('eye')
+        if (action === 'third') viewer.setMode('third-person')
+        if (action === 'free') viewer.setMode('free')
+      })
+    </script>
+  </body>
+</html>

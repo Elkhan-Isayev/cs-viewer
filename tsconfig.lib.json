@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "src",
+    "outDir": "dist-lib/types"
+  },
+  "include": ["src/embed", "src/render", "src/demo", "src/bsp", "src/mdl", "src/core"]
+}

@@ -64,6 +64,15 @@ function externalTextures(bsp) {
   return names
 }
 
+/** Reads a key out of the map's worldspawn entity. */
+function worldspawnValue(bsp, key) {
+  const entitiesOffset = bsp.readUInt32LE(4)
+  const entitiesLength = bsp.readUInt32LE(8)
+  const entities = bsp.toString('latin1', entitiesOffset, entitiesOffset + entitiesLength)
+  const match = entities.match(new RegExp(`"${key}"\\s+"([^"]*)"`))
+  return match ? match[1] : null
+}
+
 /** The worldspawn entity lists the WADs a map's textures come from. */
 function wadsReferencedBy(bsp) {
   const entitiesOffset = bsp.readUInt32LE(4)
@@ -142,6 +151,24 @@ for (const map of maps) {
   const needed = externalTextures(bsp)
   mapNeeds.set(map, { needed, wads: wadsReferencedBy(bsp) })
   console.log(`    ${needed.length} of its textures live outside the .bsp`)
+
+  // Skybox: six images named <skyname>{rt,lf,ft,bk,up,dn}, either TGA or BMP.
+  const skyName = worldspawnValue(bsp, 'skyname')
+  if (skyName) {
+    let found = 0
+    for (const side of ['rt', 'lf', 'ft', 'bk', 'up', 'dn']) {
+      for (const extension of ['tga', 'bmp']) {
+        const candidate = `cstrike/gfx/env/${skyName}${side}.${extension}`
+        const fallback = `valve/gfx/env/${skyName}${side}.${extension}`
+        const entry = zip.has(candidate) ? candidate : zip.has(fallback) ? fallback : null
+        if (!entry) continue
+        emit(`env/${skyName}${side}.${extension}`, zip.read(entry))
+        found++
+        break
+      }
+    }
+    console.log(`    skybox "${skyName}": ${found}/6 faces`)
+  }
 }
 
 // Rather than shipping whole WADs (halflife.wad alone is 37 MiB), build one

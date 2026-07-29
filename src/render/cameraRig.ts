@@ -136,15 +136,22 @@ export class CameraRig {
       this.smoothedTarget.z + Math.cos(yaw) * horizontal
     )
 
-    // Trace from the player's head to the ideal camera spot and stop short of
-    // whatever is in the way, so the view never ends up inside geometry.
     this.pivot.copy(this.smoothedTarget)
     this.pivot.y += this.shoulderHeight * 0.6
+
+    // Trace to the ideal camera spot and stop short of whatever is in the way.
+    //
+    // The trace starts at the player's own origin, not at the raised pivot:
+    // the clip hull is pre-expanded, so a point 30 units above the player is
+    // "solid" under any low ceiling, which used to report start-solid and
+    // disable collision entirely — dropping the camera outside the room.
     if (this.lineOfSight) {
-      const clear = this.lineOfSight(this.pivot, this.desired)
+      const clear = this.lineOfSight(this.smoothedTarget, this.desired)
       // Keep a floor on the pull-in; jamming the camera into the player's head
       // is worse than letting a corner clip the very edge of the view.
-      if (clear < 1) this.desired.lerpVectors(this.pivot, this.desired, Math.max(clear, MIN_CHASE_FRACTION))
+      if (clear < 1) {
+        this.desired.lerpVectors(this.smoothedTarget, this.desired, Math.max(clear, MIN_CHASE_FRACTION))
+      }
     }
 
     this.camera.position.copy(this.desired)

@@ -1,0 +1,90 @@
+/* Styles for the standalone demo page only. The viewer widget carries its own
+   styles inside its shadow root. */
+
+:root {
+  --bg: #0b0e13;
+  --panel: rgba(18, 22, 30, 0.92);
+  --border: rgba(255, 255, 255, 0.1);
+  --text: #e8ecf2;
+  --muted: #96a0b0;
+  --accent: #f0a63c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+}
+
+#stage[hidden] { display: none; }
+
+#start {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+#start[hidden] { display: none; }
+
+.panel {
+  width: min(460px, 100%);
+  padding: 30px 32px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  text-align: center;
+}
+
+.panel h1 { margin: 0 0 8px; font-size: 27px; letter-spacing: 0.02em; }
+.lead { margin: 0 0 24px; color: var(--muted); }
+.hint { margin: 12px 0 0; color: var(--muted); font-size: 12.5px; }
+
+.file-button {
+  display: inline-block;
+  padding: 11px 20px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #17120a;
+  font-weight: 600;
+  cursor: pointer;
+}
+.file-button:hover { filter: brightness(1.08); }
+.file-button code { background: rgba(0, 0, 0, 0.18); border-radius: 4px; padding: 1px 5px; }
+
+.link-button {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.start-error {
+  margin: 18px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 90, 70, 0.12);
+  color: #ff9b8a;
+  font-size: 13px;
+  text-align: left;
+  white-space: pre-wrap;
+}
+.start-error[hidden] { display: none; }
+
+.footnote { margin: 24px 0 0; font-size: 12px; color: var(--muted); }
+.footnote a { color: var(--muted); }
