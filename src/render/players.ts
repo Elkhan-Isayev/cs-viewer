@@ -83,11 +83,17 @@ export function samplePlayer(player: ReplayPlayer, time: number, out: PlayerPose
   const z = lerp(P_Z)
   quakeToVector(x, y, z, out.position)
 
-  out.pitch = track.data[base + P_PITCH]
-  out.yaw = lerpAngle(
+  out.pitch = lerpWrapped(
+    track.data[base + P_PITCH],
+    hasNext ? track.data[next + P_PITCH] : track.data[base + P_PITCH],
+    alpha,
+    360
+  )
+  out.yaw = lerpWrapped(
     track.data[base + P_YAW],
     hasNext ? track.data[next + P_YAW] : track.data[base + P_YAW],
-    alpha
+    alpha,
+    360
   )
 
   if (hasNext && span > 1e-6) {
@@ -99,7 +105,15 @@ export function samplePlayer(player: ReplayPlayer, time: number, out: PlayerPose
   }
 
   out.sequence = track.data[base + P_SEQUENCE]
-  out.frame = track.data[base + P_FRAME]
+  // `frame` is a 0..255 phase that wraps as the clip loops, and the engine only
+  // samples it ~10 times a second. Taken raw it reads as a random pose every
+  // snapshot; interpolated the short way round the cycle it becomes the smooth
+  // animation it actually is. A sequence change breaks the continuity, so hold
+  // the current phase rather than sweeping across an unrelated clip.
+  const sequenceHeld = !hasNext || track.data[next + P_SEQUENCE] === track.data[base + P_SEQUENCE]
+  out.frame = sequenceHeld
+    ? lerpWrapped(track.data[base + P_FRAME], hasNext ? track.data[next + P_FRAME] : track.data[base + P_FRAME], alpha, 256)
+    : track.data[base + P_FRAME]
   out.gaitSequence = track.data[base + P_GAIT]
   out.modelIndex = track.data[base + P_MODEL]
   out.weaponModelIndex = track.data[base + P_WEAPON_MODEL]
@@ -107,9 +121,14 @@ export function samplePlayer(player: ReplayPlayer, time: number, out: PlayerPose
   return out
 }
 
-/** Interpolates angles the short way around the circle. */
-function lerpAngle(a: number, b: number, alpha: number): number {
-  let delta = ((b - a + 540) % 360) - 180
+/**
+ * Interpolates a cyclic quantity the short way round, so a value crossing the
+ * wrap point eases through it instead of spinning the long way back.
+ * `period` is 360 for angles and 256 for the engine's animation phase.
+ */
+function lerpWrapped(a: number, b: number, alpha: number, period: number): number {
+  const half = period / 2
+  const delta = ((b - a + half + period) % period) - half
   return a + delta * alpha
 }
 
@@ -161,6 +180,8 @@ export class PlayerActor {
   readonly root = new THREE.Group()
   private instance: StudioInstance | null = null
   private currentModelPath = ''
+  private weapon: StudioInstance | null = null
+  private currentWeaponPath = ''
   private readonly label: THREE.Sprite
   /** Accumulated walk-cycle phase, advanced by how fast the player is moving. */
   private gaitPhase = 0
@@ -218,6 +239,42 @@ export class PlayerActor {
     this.gaitPhase += delta * (pose.speed / 100) * 12
     const studio = this.studioFrames(instance, pose)
     instance.applyPose(studio.sequence, studio.frame, studio.gaitSequence, studio.gaitFrame)
+
+    // The gun must be posed after the player, since it rides those bones.
+    this.ensureWeapon(pose.weaponModelIndex)
+    this.weapon?.followSkeleton(instance)
+  }
+
+  /**
+   * Puts the currently-held weapon in the player's hands. The demo's
+   * `weaponmodel` field indexes the precache table and points at a `p_*.mdl`,
+   * the third-person model — `w_*.mdl` is the one lying on the ground.
+   */
+  private ensureWeapon(weaponModelIndex: number): void {
+    const path = this.replay.models.get(weaponModelIndex)
+    // Knives, grenades mid-throw and the moment after a death all legitimately
+    // resolve to nothing; drop whatever was in hand rather than leaving it.
+    if (!path || !path.includes('/p_')) {
+      if (this.weapon) {
+        this.root.remove(this.weapon.root)
+        this.weapon.dispose()
+        this.weapon = null
+      }
+      this.currentWeaponPath = ''
+      return
+    }
+    if (path === this.currentWeaponPath) return
+    this.currentWeaponPath = path
+
+    void this.library.load(path).then((data) => {
+      if (!data || this.currentWeaponPath !== path) return
+      if (this.weapon) {
+        this.root.remove(this.weapon.root)
+        this.weapon.dispose()
+      }
+      this.weapon = new StudioInstance(data)
+      this.root.add(this.weapon.root)
+    })
   }
 
   private studioFrames(
@@ -261,6 +318,7 @@ export class PlayerActor {
 
   dispose(): void {
     this.instance?.dispose()
+    this.weapon?.dispose()
     this.fallback.geometry.dispose()
     ;(this.fallback.material as THREE.Material).dispose()
     this.label.material.map?.dispose()
@@ -287,8 +345,10 @@ function createNameTag(text: string, color: number): THREE.Sprite {
 
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.SRGBColorSpace
+  // Depth-tested on purpose: a tag floating over a wall that hides its owner
+  // reads as "the player models are missing" rather than "they are behind that".
   const sprite = new THREE.Sprite(
-    new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true })
+    new THREE.SpriteMaterial({ map: texture, transparent: true })
   )
   sprite.scale.set(canvas.width / scale, canvas.height / scale, 1)
   sprite.renderOrder = 10

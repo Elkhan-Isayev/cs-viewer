@@ -437,15 +437,31 @@ for (const player of replay.players) {
   const frameCount = sequences[sequence]?.frameCount ?? 1
   instance.applyPose(sequence, (p.frame / 256) * Math.max(frameCount - 1, 0), 0, 0)
 
+  // The weapon in hand: a `p_*.mdl` posed by bone-merging onto the player.
+  const weaponPath = replay.models.get(p.weaponModelIndex)
+  const weaponData = weaponPath?.includes('/p_') ? loadModel(weaponPath) : null
+  const weapon = weaponData ? new StudioInstance(weaponData) : null
+  if (weapon) weapon.followSkeleton(instance)
+
   const holder = new THREE.Group()
   holder.position.copy(p.position)
   holder.quaternion
     .copy(QUAKE_TO_THREE)
     .multiply(new THREE.Quaternion().setFromAxisAngle(UP_Z, THREE.MathUtils.degToRad(p.yaw)))
   holder.add(instance.root)
+  if (weapon) holder.add(weapon.root)
   holder.updateMatrixWorld(true)
 
-  // CPU skinning: studio vertices live in their bone's local frame.
+  const tint = HIGHLIGHT && player.slot === subject.slot ? [1.0, 0.78, 0.3] : null
+  playerTriangles += rasteriseStudio(data, instance, tint)
+  if (weapon && weaponData) playerTriangles += rasteriseStudio(weaponData, weapon, tint)
+  drawnPlayers++
+}
+console.log(`  ${drawnPlayers} players, ${playerTriangles.toLocaleString()} triangles`)
+
+/** CPU-skins one studio instance and rasterises it. Returns triangles drawn. */
+function rasteriseStudio(data, instance, tint) {
+  let drawn = 0
   const geometry = data.geometry
   const position = geometry.getAttribute('position')
   const normal = geometry.getAttribute('normal')
@@ -475,8 +491,6 @@ for (const player of replay.players) {
     ? geometry.groups
     : [{ start: 0, count: position.count, materialIndex: 0 }]
 
-  const tint = HIGHLIGHT && player.slot === subject.slot ? [1.0, 0.78, 0.3] : null
-
   for (const group of groups) {
     const material = data.materials[group.materialIndex] ?? data.materials[0]
     const diffuse = sampler(material?.map)
@@ -491,12 +505,11 @@ for (const player of replay.players) {
         attr[4] = shades[i + k]
         vertices.push({ clip: clips[i + k], attr })
       }
-      playerTriangles += emitTriangle(vertices, diffuse, null, tint, null)
+      drawn += emitTriangle(vertices, diffuse, null, tint, null)
     }
   }
-  drawnPlayers++
+  return drawn
 }
-console.log(`  ${drawnPlayers} players, ${playerTriangles.toLocaleString()} triangles`)
 
 // --- PNG ------------------------------------------------------------------
 

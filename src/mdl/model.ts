@@ -183,6 +183,13 @@ const TORSO_ROOT = 'Bip01 Spine'
 export class StudioInstance {
   readonly root: THREE.Group
   readonly mesh: THREE.SkinnedMesh
+  /**
+   * Bones by their raw studio name, so a weapon can ride the player's arm.
+   * Deliberately not keyed on `data.boneNames`, which suffixes the index to
+   * keep three.js names unique — those indices differ between a 53-bone player
+   * and a 13-bone weapon, and matching on them works only by coincidence.
+   */
+  readonly boneByName = new Map<string, THREE.Bone>()
   private readonly bones: THREE.Bone[]
   private readonly data: StudioModelData
   /** True for bones the upper-body sequence drives. */
@@ -203,6 +210,7 @@ export class StudioInstance {
     this.bones = mdl.bones.map(() => new THREE.Bone())
     mdl.bones.forEach((bone, i) => {
       this.bones[i].name = data.boneNames[i]
+      if (bone.name) this.boneByName.set(bone.name, this.bones[i])
       if (bone.parent >= 0) this.bones[bone.parent].add(this.bones[i])
     })
 
@@ -253,17 +261,60 @@ export class StudioInstance {
     }
   }
 
+  /**
+   * Poses this model by borrowing `host`'s skeleton wherever the bone names
+   * agree, which is how GoldSrc draws a weapon in a player's hands.
+   *
+   * A `p_*.mdl` carries no animation worth the name — one two-frame `idle` —
+   * because it is not animated independently. Its bones are a copy of the
+   * player's arm chain (`Bip01` → `Pelvis` → `Spine…` → `R Hand`) under the
+   * same names, and the engine renders it with the player's bone transforms so
+   * the gun tracks the hand through every reload and stumble. Bones the player
+   * does not have — a muzzle `flash` locator, say — keep the weapon's own pose.
+   *
+   * Local transforms are copied rather than world matrices: the shared chain
+   * has the same parents in the same order, so the world result is identical
+   * and there is nothing to decompose.
+   */
+  followSkeleton(host: StudioInstance): void {
+    const { mdl } = this.data
+    const idle = mdl.sequences[0]
+    for (let i = 0; i < mdl.bones.length; i++) {
+      const shared = host.boneByName.get(mdl.bones[i].name)
+      if (shared) {
+        this.bones[i].position.copy(shared.position)
+        this.bones[i].quaternion.copy(shared.quaternion)
+      } else {
+        this.poseBone(i, idle, 0)
+      }
+    }
+  }
+
   private poseBone(boneIndex: number, sequence: { animOffset: number; frameCount: number } | undefined, frame: number): void {
     const bone = this.data.mdl.bones[boneIndex]
     const target = this.bones[boneIndex]
 
     const values = [0, 0, 0, 0, 0, 0]
+    // Studio clips run at 30-ish fps but the demo is played back at whatever
+    // the display refreshes at, so land between keyframes and blend them.
+    // Sampling only the floor makes every animation step visibly.
+    const last = sequence ? sequence.frameCount - 1 : 0
+    const whole = Math.min(Math.max(Math.floor(frame), 0), last)
+    const nextWhole = Math.min(whole + 1, last)
+    const blend = Math.min(Math.max(frame - whole, 0), 1)
+
     for (let channel = 0; channel < 6; channel++) {
       let value = bone.value[channel]
       if (sequence && sequence.frameCount > 0) {
-        const clamped = Math.min(Math.max(Math.floor(frame), 0), sequence.frameCount - 1)
-        const delta = readAnimChannel(this.data.mdl.bytes, sequence.animOffset, boneIndex, channel, clamped)
-        if (delta !== null) value += delta * bone.scale[channel]
+        const a = readAnimChannel(this.data.mdl.bytes, sequence.animOffset, boneIndex, channel, whole)
+        if (a !== null) {
+          const b = nextWhole === whole
+            ? a
+            : readAnimChannel(this.data.mdl.bytes, sequence.animOffset, boneIndex, channel, nextWhole) ?? a
+          // Rotations are stored as raw Euler steps; over one frame they never
+          // approach a wrap, so a plain lerp is safe and much cheaper than slerp.
+          value += (a + (b - a) * blend) * bone.scale[channel]
+        }
       }
       values[channel] = value
     }

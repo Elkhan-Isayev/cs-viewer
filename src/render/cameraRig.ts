@@ -55,6 +55,12 @@ export class CameraRig {
   private readonly lookAt = new THREE.Vector3()
   private readonly pivot = new THREE.Vector3()
   private initialised = false
+  private hasFramed = false
+
+  /** Whether the rig has ever framed a player, and so has a pose worth keeping. */
+  get framed(): boolean {
+    return this.hasFramed
+  }
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(75, aspect, 4, 12000)
@@ -63,6 +69,15 @@ export class CameraRig {
   resize(aspect: number): void {
     this.camera.aspect = aspect
     this.camera.updateProjectionMatrix()
+  }
+
+  /**
+   * Drops the smoothing history so the next update snaps to its subject.
+   * Used when the camera changes player: interpolating across the map would
+   * fly the view through every wall in between.
+   */
+  reframe(): void {
+    this.initialised = false
   }
 
   /** Places the free camera where the chase camera currently is. */
@@ -101,13 +116,26 @@ export class CameraRig {
   }
 
   update(target: FollowTarget | null, instant = false): void {
-    if (this.mode === 'free' || !target) {
+    if (this.mode === 'free') {
       this.camera.position.copy(this.freePosition)
       this.camera.rotation.set(0, 0, 0, 'YXZ')
       this.camera.rotateY(this.freeYaw)
       this.camera.rotateX(this.freePitch)
       return
     }
+
+    // The followed player is dead, disconnected, or has not spawned yet. Hold
+    // the last framing: snapping to `freePosition` would drop the camera at an
+    // arbitrary parked point, which in most maps is inside a wall.
+    if (!target) {
+      if (this.hasFramed) return
+      this.camera.position.copy(this.freePosition)
+      this.camera.rotation.set(0, 0, 0, 'YXZ')
+      this.camera.rotateY(this.freeYaw)
+      this.camera.rotateX(this.freePitch)
+      return
+    }
+    this.hasFramed = true
 
     if (this.mode === 'eye') {
       this.camera.position.copy(target.position)

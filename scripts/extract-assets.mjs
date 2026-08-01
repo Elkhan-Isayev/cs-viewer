@@ -213,9 +213,10 @@ for (const name of zip.list((n) => /^cstrike\/models\/player\/[^/]+\/[^/]+\.mdl$
   emit(`models/player/${folder}/${file}`, zip.read(name))
 }
 
-// Weapon world models, so the viewer can put the right gun in players' hands.
+// Weapon models. `p_*` are the ones held in a player's hands, and are what the
+// demo's `weaponmodel` field actually points at; `w_*` are the dropped pickups.
 console.log('\nWeapon models:')
-for (const name of zip.list((n) => /^cstrike\/models\/w_[a-z0-9_]+\.mdl$/.test(n))) {
+for (const name of zip.list((n) => /^cstrike\/models\/[pw]_[a-z0-9_]+\.mdl$/.test(n))) {
   emit(`models/${name.split('/').pop()}`, zip.read(name))
 }
 

@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { parseTga } from '../bsp/tga.ts'
+import { createImageTexture } from './texture.ts'
 
 /**
  * The map's skybox: six images that GoldSrc names `<sky>{rt,lf,ft,bk,up,dn}`.
@@ -79,7 +80,7 @@ export function buildSkybox(faces: SkyFaces): Skybox | null {
       return null
     }
 
-    const texture = new THREE.DataTexture(image.pixels, image.width, image.height, THREE.RGBAFormat)
+    const texture = createImageTexture(image.pixels, image.width, image.height)
     texture.colorSpace = THREE.SRGBColorSpace
     texture.minFilter = THREE.LinearFilter
     texture.magFilter = THREE.LinearFilter

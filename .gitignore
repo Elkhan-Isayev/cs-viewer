@@ -13,3 +13,7 @@ public/assets/
 
 # Output of `npm run still`.
 preview.png
+
+# editors
+.idea/
+.vscode/

@@ -194,6 +194,9 @@ export function buildMapScene(bsp: Bsp): BuiltMap {
 
     let diffuse = diffuseTextures.get(textureIndex)
     if (!diffuse) {
+      // Not flipped, unlike the skybox: GoldSrc's `vs` texture coordinate and
+      // an unflipped upload both start at the image's top row and increase
+      // downward, so the two conventions already agree.
       diffuse = new THREE.DataTexture(texture.pixels!, texture.width, texture.height, THREE.RGBAFormat)
       diffuse.wrapS = THREE.RepeatWrapping
       diffuse.wrapT = THREE.RepeatWrapping

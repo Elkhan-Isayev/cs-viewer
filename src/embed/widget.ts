@@ -110,6 +110,7 @@ export class CsViewer {
     duration: HTMLElement
     scrubber: HTMLInputElement
     speed: HTMLSelectElement
+    brightness: HTMLInputElement
     mode: HTMLSelectElement
     follow: HTMLSelectElement
   }
@@ -141,6 +142,13 @@ export class CsViewer {
     this.viewer = new Viewer({ canvas: this.ui.canvas, assetBaseUrl: this.options.assets })
     this.viewer.showNameTags = this.options.nameTags
     this.viewer.setMode(this.options.mode)
+    // The viewer moves the camera off players who leave the world; keep the
+    // dropdown, the roster and anything listening in step with it.
+    this.viewer.onFollowChange = (slot) => {
+      this.ui.follow.value = String(slot)
+      this.renderRoster()
+      this.emit('followchange', slot)
+    }
 
     this.bindInput()
     this.observeSize()
@@ -228,6 +236,8 @@ export class CsViewer {
   seek(seconds: number): void {
     if (!this.replay) return
     this.time = Math.min(Math.max(seconds, 0), this.replay.duration)
+    // A seek is a cut, not a move: don't sweep the camera across the map.
+    this.viewer.rig.reframe()
     this.syncTransport(true)
   }
 
@@ -243,10 +253,11 @@ export class CsViewer {
 
   setBrightness(value: number): void {
     this.viewer.setBrightness(value)
+    this.ui.brightness.value = String(value)
   }
 
   follow(slot: number): void {
-    this.viewer.followSlot = slot
+    this.viewer.setFollow(slot)
     this.ui.follow.value = String(slot)
     this.renderRoster()
     this.emit('followchange', slot)
@@ -568,6 +579,9 @@ export class CsViewer {
       this.seek((Number(this.ui.scrubber.value) / 1000) * this.replay.duration)
     })
     this.ui.speed.addEventListener('change', () => this.setSpeed(Number(this.ui.speed.value)))
+    this.ui.brightness.addEventListener('input', () =>
+      this.viewer.setBrightness(Number(this.ui.brightness.value))
+    )
     this.ui.mode.addEventListener('change', () => this.setMode(this.ui.mode.value as CameraMode))
     this.ui.follow.addEventListener('change', () => this.follow(Number(this.ui.follow.value)))
 
@@ -634,6 +648,16 @@ export class CsViewer {
     )
     const follow = document.createElement('select')
 
+    // GoldSrc maps bake their own lighting, and night maps like de_inferno are
+    // genuinely dark. The engine had a gamma slider; so does this.
+    const brightness = el('input', 'brightness') as HTMLInputElement
+    brightness.type = 'range'
+    brightness.min = '0.5'
+    brightness.max = '3'
+    brightness.step = '0.1'
+    brightness.value = String(this.options.brightness)
+    brightness.title = 'Brightness'
+
     const controls = el('footer', 'controls')
     controls.hidden = true
     controls.append(
@@ -642,6 +666,7 @@ export class CsViewer {
       scrubber,
       duration,
       labelled('Speed', speed, true),
+      labelled('Light', brightness, true),
       labelled('View', mode, false),
       labelled('Follow', follow, true)
     )
@@ -651,7 +676,7 @@ export class CsViewer {
     return {
       canvas, loading, loadingBar, loadingStage, error, errorText,
       sidebar, matchMap, matchServer, roster, feedTitle, feed, banner,
-      controls, play, time, duration, scrubber, speed, mode, follow
+      controls, play, time, duration, scrubber, speed, brightness, mode, follow
     }
   }
 }

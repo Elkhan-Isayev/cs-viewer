@@ -14,6 +14,13 @@ export interface ViewerOptions {
 }
 
 /**
+ * How long the followed player may be missing before the camera moves on.
+ * Long enough to ride out the gap between rounds and the odd dropped snapshot,
+ * short enough that a death does not leave you staring at an empty street.
+ */
+const FOLLOW_GRACE = 1.5
+
+/**
  * Renders a parsed replay: the map, the players, and a camera that can chase
  * any of them in third person.
  */
@@ -32,6 +39,11 @@ export class Viewer {
   /** Slot of the player the camera follows, or null for a free look. */
   followSlot: number | null = null
   showNameTags = true
+  /** Called when the viewer picks a different player on its own. */
+  onFollowChange: ((slot: number) => void) | null = null
+
+  /** Replay time at which the followed player went missing, if they have. */
+  private followAbsentSince: number | null = null
 
   private lastFrameAt = performance.now()
   private running = false
@@ -139,6 +151,14 @@ export class Viewer {
     this.followSlot ??= replay.players[0]?.slot ?? null
   }
 
+  /** Points the camera at a player, cutting rather than sweeping to them. */
+  setFollow(slot: number | null): void {
+    if (slot === this.followSlot) return
+    this.followSlot = slot
+    this.followAbsentSince = null
+    this.rig.reframe()
+  }
+
   setMode(mode: CameraMode): void {
     if (mode === 'free' && this.rig.mode !== 'free') this.rig.detach()
     this.rig.mode = mode
@@ -146,6 +166,28 @@ export class Viewer {
 
   setBrightness(value: number): void {
     this.map?.setBrightness(value)
+  }
+
+  /**
+   * Chooses who to watch when the followed player is gone. Staying on their
+   * team keeps the thread of the round; failing that, anyone still alive.
+   */
+  private pickSubstitute(present: number[], time: number): number | null {
+    if (present.length === 0) return null
+
+    const previous = this.followSlot !== null ? this.actors.get(this.followSlot) : undefined
+    const wantedTeam = previous ? previous.teamAtTime(time, -1) : 0
+
+    let fallback: number | null = null
+    const scratch = createPose()
+    for (const slot of present) {
+      const actor = this.actors.get(slot)
+      if (!actor) continue
+      fallback ??= slot
+      const pose = samplePlayer(actor.player, time, scratch)
+      if (actor.teamAtTime(time, pose.modelIndex) === wantedTeam) return slot
+    }
+    return fallback
   }
 
   /** Players present in the world at `time`, for the scoreboard. */
@@ -167,17 +209,43 @@ export class Viewer {
     this.lastFrameAt = now
 
     let followTarget: { position: THREE.Vector3; pitch: number; yaw: number } | null = null
+    const present: number[] = []
 
     for (const [slot, actor] of this.actors) {
       const pose = samplePlayer(actor.player, time, this.pose)
       actor.setLabelVisible(this.showNameTags && slot !== this.followSlot)
       actor.update(pose, delta)
+      if (pose.present) present.push(slot)
 
       if (slot === this.followSlot && pose.present) {
         followTarget = {
           position: pose.position.clone(),
           pitch: pose.pitch,
           yaw: pose.yaw
+        }
+      }
+    }
+
+    // Players spend a lot of a match out of the world — dead, spectating, or
+    // between rounds — and a camera bolted to one of them would spend just as
+    // long looking at nothing. Move to someone still playing.
+    if (followTarget) {
+      this.followAbsentSince = null
+    } else if (this.followSlot !== null && present.length > 0) {
+      this.followAbsentSince ??= time
+      // Compared with `abs` so that scrubbing backwards counts as a jump too.
+      const gone = Math.abs(time - this.followAbsentSince)
+      if (gone > FOLLOW_GRACE || !this.rig.framed) {
+        const next = this.pickSubstitute(present, time)
+        const actor = next === null ? undefined : this.actors.get(next)
+        if (actor && next !== null && next !== this.followSlot) {
+          this.followSlot = next
+          this.followAbsentSince = null
+          const pose = samplePlayer(actor.player, time, this.pose)
+          followTarget = { position: pose.position.clone(), pitch: pose.pitch, yaw: pose.yaw }
+          // Cut rather than sweep across the map to the new subject.
+          this.rig.reframe()
+          this.onFollowChange?.(next)
         }
       }
     }

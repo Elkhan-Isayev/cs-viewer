@@ -125,7 +125,7 @@ for (const folder of existsSync(playersDir) ? readdirSync(playersDir) : []) {
 const demo = join(assets, '..', 'demos', 'demo.dem')
 if (existsSync(demo)) {
   console.log('\ncamera against demo.dem')
-  const { parseReplay } = await import('../src/demo/replay.ts')
+  const { parseReplay, PLAYER_STRIDE, P_PITCH } = await import('../src/demo/replay.ts')
   const { samplePlayer, createPose } = await import('../src/render/players.ts')
   const { CameraRig } = await import('../src/render/cameraRig.ts')
   const { anglesToForward } = await import('../src/render/coords.ts')
@@ -169,6 +169,75 @@ if (existsSync(demo)) {
     if (look.setY(0).normalize().dot(anglesToForward(0, pose.yaw)) > 0.99) aligned++
   }
   check('eye camera looks where the player aims', eyeSamples > 0 && aligned === eyeSamples, `${aligned}/${eyeSamples} samples`)
+
+  // Players drop out of the world constantly — dead, spectating, between
+  // rounds. A null target used to fall through to the free camera's parked
+  // position, teleporting the view into whatever the map centre happens to be.
+  rig.mode = 'third-person'
+  rig.freePosition.set(9999, 9999, 9999)
+  const held = rig.camera.position.clone()
+  rig.update(null)
+  check(
+    'camera holds position when the followed player leaves the world',
+    rig.camera.position.distanceTo(held) < 1e-6,
+    `stayed at ${held.toArray().map((n) => n.toFixed(0)).join(', ')}`
+  )
+
+  // How often that actually happens, so the substitution logic is not
+  // guarding against a hypothetical.
+  let absent = 0
+  const checkpoints = 200
+  for (let i = 0; i < checkpoints; i++) {
+    const t = (replay.duration * i) / checkpoints
+    if (!samplePlayer(replay.players[0], t, pose).present) absent++
+  }
+  check(
+    'the default subject really does leave the world',
+    absent > 0,
+    `absent at ${absent}/${checkpoints} sampled times`
+  )
+
+  // HL stores `pev->angles[0] = -v_angle[0] / 3`, so the wire value is a third
+  // of the real view pitch and inverted. Recovered, it must reach real angles.
+  let steepest = 0
+  for (const player of replay.players) {
+    for (let i = 0; i < player.track.count; i += 97) {
+      steepest = Math.max(steepest, Math.abs(player.track.data[i * PLAYER_STRIDE + P_PITCH]))
+    }
+  }
+  check(
+    'view pitch is recovered to a real range',
+    steepest > 60 && steepest <= 90,
+    `steepest ${steepest.toFixed(1)}° (a third of it would be ${(steepest / 3).toFixed(1)}°)`
+  )
+
+  // The weapon a player holds is bone-merged onto their arm, so its hand bone
+  // has to land on the player's hand bone rather than at the model origin.
+  const read = (p) => buildStudioModel(new Uint8Array(readFileSync(join(assets, p))))
+  const body = new StudioInstance(read('models/player/terror/terror.mdl'))
+  const gun = new StudioInstance(read('models/p_m4a1.mdl'))
+
+  body.applyPose(19, 12, 0, 0)
+  gun.followSkeleton(body)
+  body.root.updateMatrixWorld(true)
+  gun.root.updateMatrixWorld(true)
+
+  const hand = new THREE.Vector3().setFromMatrixPosition(body.boneByName.get('Bip01 R Hand').matrixWorld)
+  const grip = new THREE.Vector3().setFromMatrixPosition(gun.boneByName.get('Bip01 R Hand').matrixWorld)
+  check(
+    'the weapon rides the player’s hand bone',
+    hand.distanceTo(grip) < 0.01 && hand.length() > 1,
+    `hand at ${hand.toArray().map((n) => n.toFixed(1)).join(', ')}, grip ${hand.distanceTo(grip).toFixed(4)} away`
+  )
+
+  // A muzzle locator is the weapon's own bone, so it must be posed from the
+  // weapon and end up somewhere out in front of the hand, not stuck on it.
+  const flash = new THREE.Vector3().setFromMatrixPosition(gun.boneByName.get('flash').matrixWorld)
+  check(
+    'the weapon keeps its own unshared bones',
+    flash.distanceTo(grip) > 1,
+    `muzzle sits ${flash.distanceTo(grip).toFixed(1)} units from the grip`
+  )
 }
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)

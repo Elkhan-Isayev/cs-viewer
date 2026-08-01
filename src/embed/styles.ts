@@ -191,6 +191,7 @@ canvas {
 .time { font-variant-numeric: tabular-nums; color: var(--csv-muted); font-size: 12.5px; flex: none; }
 
 .scrubber { flex: 1; min-width: 60px; accent-color: var(--csv-accent); }
+.brightness { width: 72px; accent-color: var(--csv-accent); }
 
 .control { display: flex; align-items: center; gap: 5px; flex: none; font-size: 12px; color: var(--csv-muted); }
 

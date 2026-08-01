@@ -84,6 +84,20 @@ interface LiveEntity {
 const num = (v: number | string | undefined, fallback = 0): number =>
   typeof v === 'number' ? v : fallback
 
+/**
+ * Recovers a player's real view pitch from the entity's `angles[0]`.
+ *
+ * Half-Life does not transmit the view pitch directly for players. The server
+ * stores `pev->angles[0] = -v_angle[0] / 3`, a leftover of how the studio
+ * renderer bends the spine, so the wire value is a third of the truth and
+ * inverted. Measured across this project's sample demo, `angles[0]` spans
+ * -29.7°..29.7° — exactly ±89/3 — which is what confirms the factor.
+ */
+function viewPitch(angle: number): number {
+  const signed = angle > 180 ? angle - 360 : angle
+  return -3 * signed
+}
+
 /** Splits a GoldSrc infostring (`\key\value\key\value`). */
 function parseInfoString(info: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -193,7 +207,7 @@ export function parseReplay(bytes: Uint8Array, onProgress?: (p: ParseProgress) =
       scratch[P_X] = num(v['origin[0]'])
       scratch[P_Y] = num(v['origin[1]'])
       scratch[P_Z] = num(v['origin[2]'])
-      scratch[P_PITCH] = num(v['angles[0]'])
+      scratch[P_PITCH] = viewPitch(num(v['angles[0]']))
       scratch[P_YAW] = num(v['angles[1]'])
       scratch[P_SEQUENCE] = num(v.sequence)
       scratch[P_GAIT] = num(v.gaitsequence)

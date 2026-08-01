@@ -49,7 +49,8 @@ with a browser.
 | 🎥 **Third-person camera** | Chase camera behind any player, with mouse orbit and zoom, kept out of geometry by the engine's own hull tracing. |
 | 👁 **Two more views** | First-person down the player's aim, and a detached free-fly camera. |
 | 🗺 **The actual map** | The `.bsp` rendered with its own textures, **baked lightmaps** and skybox. |
-| 🧍 **The actual player models** | Half-Life studio models, GPU-skinned: legs on the walk cycle, torso on the aiming animation. |
+| 🧍 **The actual player models** | Half-Life studio models, GPU-skinned: legs on the walk cycle, torso on the aiming animation, interpolated between keyframes. |
+| 🔫 **The weapon they were holding** | The `p_*.mdl` bone-merged onto the player's arm, exactly as GoldSrc does it — so the gun tracks the hand through every reload. |
 | ⏯ **Full transport** | Play/pause, scrub, 0.25×–8× speed, jump between players. |
 | 📋 **Match context** | Roster by team, kill feed and round outcomes, recovered from the demo's own messages. |
 | 🧩 **Embeddable** | One ES module, shadow-DOM isolated, with a small API. Drops onto any page. |
@@ -418,12 +419,15 @@ which now pulls `gfx/env/<skyname>*` alongside the map.
 
 ## Limits
 
-- **Weapons are not drawn in players' hands.** The weapon model index is decoded, but
-  attaching it correctly needs the studio attachment points; a wrongly-placed gun looks
-  worse than none. The current weapon shows in the kill feed instead.
-- **No sounds, muzzle flashes, grenades or bomb entities.** Non-player entities are
-  decoded but not sampled or drawn — `recordSample` in `src/demo/replay.ts` is the place
-  to extend.
+- **No audio at all.** Nothing is played: no gunfire, footsteps or radio. Gunfire is the
+  awkward one — CS fires weapons through HL *events* (`events/ak47.sc`) that the client
+  turns into a sound locally, so a demo carries the event index and not the `.wav`. Wiring
+  it up means mapping the precached event list onto sound names by hand, then extracting
+  `cstrike/sound/` and playing it back positionally. `readSound` in
+  `src/demo/messages.ts` currently walks `svc_sound` and discards it.
+- **No muzzle flashes, grenades or bomb entities.** Non-player entities are decoded but
+  not sampled or drawn — `recordSample` in `src/demo/replay.ts` is the place to extend.
+  Weapon *models* are drawn; only the effects around them are missing.
 - **Only demo protocol 5 / network protocol 48** — CS 1.6 and Half-Life era GoldSrc.
   CS:GO and CS2 demos are a completely different (protobuf) format.
 - Round markers come from `TextMsg` tokens, so they reflect what the server broadcast;
