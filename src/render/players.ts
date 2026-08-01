@@ -3,7 +3,6 @@ import { buildStudioModel, StudioInstance, type StudioModelData } from '../mdl/m
 import {
   PLAYER_STRIDE,
   P_FRAME,
-  P_BLEND,
   P_GAIT,
   P_MODEL,
   P_PITCH,
@@ -49,6 +48,11 @@ const TAG_SCREEN_FRACTION = 0.022
 /** Past this the tag is clutter rather than information. */
 const TAG_MAX_DISTANCE = 2600
 
+/** Below this the player counts as standing still and the body faces their aim. */
+const GAIT_MOVING_SPEED = 12
+/** How fast the body swings round to the direction of travel, per second. */
+const GAIT_TURN_RATE = 8
+
 export interface PlayerPose {
   present: boolean
   position: THREE.Vector3
@@ -56,11 +60,11 @@ export interface PlayerPose {
   yaw: number
   /** Horizontal speed in units per second, used to drive the walk cycle. */
   speed: number
+  /** Direction of travel in degrees, meaningful only while `speed` is non-zero. */
+  moveYaw: number
   sequence: number
   frame: number
   gaitSequence: number
-  /** Position along the aim sequence's blend axis, 0..1. */
-  blend: number
   modelIndex: number
   weaponModelIndex: number
 }
@@ -114,8 +118,11 @@ export function samplePlayer(player: ReplayPlayer, time: number, out: PlayerPose
     const dx = track.data[next + P_X] - track.data[base + P_X]
     const dy = track.data[next + P_Y] - track.data[base + P_Y]
     out.speed = Math.hypot(dx, dy) / span
+    // Quake yaw 0 faces +X, and the track is still in Quake coordinates here.
+    out.moveYaw = out.speed > 1e-3 ? THREE.MathUtils.radToDeg(Math.atan2(dy, dx)) : out.yaw
   } else {
     out.speed = 0
+    out.moveYaw = out.yaw
   }
 
   out.sequence = track.data[base + P_SEQUENCE]
@@ -129,18 +136,15 @@ export function samplePlayer(player: ReplayPlayer, time: number, out: PlayerPose
     ? lerpWrapped(track.data[base + P_FRAME], hasNext ? track.data[next + P_FRAME] : track.data[base + P_FRAME], alpha, 256)
     : track.data[base + P_FRAME]
   out.gaitSequence = track.data[base + P_GAIT]
-  // `blending[0]` is where the player is looking along the aim sequence's
-  // pitch axis, 0..255 on the wire.
-  out.blend = lerpWrapped(
-    track.data[base + P_BLEND],
-    hasNext ? track.data[next + P_BLEND] : track.data[base + P_BLEND],
-    alpha,
-    256
-  ) / 255
   out.modelIndex = track.data[base + P_MODEL]
   out.weaponModelIndex = track.data[base + P_WEAPON_MODEL]
   out.present = true
   return out
+}
+
+/** Signed difference from `a` to `b` in degrees, taking the short way round. */
+function shortestAngle(a: number, b: number): number {
+  return ((b - a + 540) % 360) - 180
 }
 
 /**
@@ -161,10 +165,10 @@ export function createPose(): PlayerPose {
     pitch: 0,
     yaw: 0,
     speed: 0,
+    moveYaw: 0,
     sequence: 0,
     frame: 0,
     gaitSequence: 0,
-    blend: 0.5,
     modelIndex: 0,
     weaponModelIndex: 0
   }
@@ -211,8 +215,12 @@ export class PlayerActor {
   private readonly label: THREE.Sprite
   /** Canvas size of the tag, in pixels, for the constant-size maths. */
   private readonly labelPixels: { width: number; height: number }
-  /** Accumulated walk-cycle phase, advanced by how fast the player is moving. */
+  /** Accumulated walk-cycle phase, advanced by the ground the player covers. */
   private gaitPhase = 0
+  /** Direction the body faces, which lags the view while moving. */
+  private gaitYaw = 0
+  /** Bone-controller dials, slots 0..3 being the torso twist. */
+  private readonly controllers = [0.5, 0.5, 0.5, 0.5]
   private readonly fallback: THREE.Mesh
 
   readonly player: ReplayPlayer
@@ -272,9 +280,12 @@ export class PlayerActor {
     if (!pose.present) return
 
     this.root.position.copy(pose.position)
+    const gaitYaw = this.updateGaitYaw(pose, delta)
     // Studio models are authored in Quake space (Z-up, facing +X). Rotate about
-    // the model's own Z by the yaw, then map Quake axes onto the Y-up scene.
-    SPIN.setFromAxisAngle(UP_Z, THREE.MathUtils.degToRad(pose.yaw))
+    // the model's own Z by the gait yaw, then map Quake axes onto the Y-up
+    // scene. The gait yaw, not the view yaw: the body follows where the player
+    // is walking, and only their aim follows where they are looking.
+    SPIN.setFromAxisAngle(UP_Z, THREE.MathUtils.degToRad(gaitYaw))
     this.body.quaternion.copy(QUAKE_TO_THREE).multiply(SPIN)
 
     this.ensureModel(pose.modelIndex)
@@ -282,11 +293,16 @@ export class PlayerActor {
     const instance = this.instance
     if (!instance) return
 
-    // The gait cycle is not transmitted; drive it from ground speed so walking
-    // and running read correctly.
-    this.gaitPhase += delta * (pose.speed / 100) * 12
     const studio = this.studioFrames(instance, pose)
-    instance.applyPose(studio.sequence, studio.frame, studio.gaitSequence, studio.gaitFrame, pose.blend)
+    this.advanceGait(instance, studio.gaitSequence, pose.speed, delta)
+    instance.applyPose(
+      studio.sequence,
+      studio.frame,
+      studio.gaitSequence,
+      studio.gaitFrame,
+      studio.blend,
+      this.controllers
+    )
 
     // The gun must be posed after the player, since it rides those bones.
     this.ensureWeapon(pose.weaponModelIndex)
@@ -325,10 +341,70 @@ export class PlayerActor {
     })
   }
 
+  /**
+   * Tracks which way the body faces, the way the engine's `StudioProcessGait`
+   * does: standing still it snaps to where the player is looking, and once
+   * they move it eases round to the direction they are travelling.
+   *
+   * Also fills the torso controllers with the difference between the two, so
+   * models that carry Half-Life's spine dials twist to keep facing the aim.
+   */
+  private updateGaitYaw(pose: PlayerPose, delta: number): number {
+    if (pose.speed < GAIT_MOVING_SPEED) {
+      this.gaitYaw = pose.yaw
+    } else {
+      const toward = shortestAngle(this.gaitYaw, pose.moveYaw)
+      this.gaitYaw += toward * Math.min(delta * GAIT_TURN_RATE, 1)
+    }
+
+    // Running backwards would otherwise spin the body to face away from the
+    // view. The engine flips the gait by half a turn instead and lets the legs
+    // cycle backwards, which keeps the player facing roughly where they aim.
+    let twist = shortestAngle(this.gaitYaw, pose.yaw)
+    if (twist > 120) {
+      this.gaitYaw += 180
+      twist -= 180
+    } else if (twist < -120) {
+      this.gaitYaw -= 180
+      twist += 180
+    }
+
+    // Slots 0..3 each take a quarter of the twist, over a -30..30 degree range.
+    const dial = Math.min(Math.max(twist / 4 + 30, 0), 60) / 60
+    this.controllers[0] = dial
+    this.controllers[1] = dial
+    this.controllers[2] = dial
+    this.controllers[3] = dial
+    return this.gaitYaw
+  }
+
+  /**
+   * Advances the walk cycle by the ground actually covered.
+   *
+   * A gait sequence records how far it carries the model in `linearMovement`,
+   * so dividing the distance travelled by it steps the animation exactly in
+   * time with the player — walking, running and standing still each read as
+   * themselves, and the feet stop sliding over the floor.
+   */
+  private advanceGait(instance: StudioInstance, gaitSequence: number, speed: number, delta: number): void {
+    const sequence = instance.sequenceInfo[gaitSequence]
+    if (!sequence || sequence.frameCount < 2) {
+      this.gaitPhase = 0
+      return
+    }
+    const stride = sequence.linearMovement?.[0] ?? 0
+    if (stride > 1) {
+      this.gaitPhase += ((speed * delta) / stride) * sequence.frameCount
+    } else if (speed > GAIT_MOVING_SPEED) {
+      // An idle-in-place cycle carries no distance; run it at its own rate.
+      this.gaitPhase += delta * sequence.fps
+    }
+  }
+
   private studioFrames(
     instance: StudioInstance,
     pose: PlayerPose
-  ): { sequence: number; frame: number; gaitSequence: number; gaitFrame: number } {
+  ): { sequence: number; frame: number; gaitSequence: number; gaitFrame: number; blend: number } {
     const sequences = instance.sequenceInfo
     const sequence = Math.max(0, Math.min(Math.round(pose.sequence), sequences.length - 1))
     const gaitSequence = Math.max(0, Math.min(Math.round(pose.gaitSequence), sequences.length - 1))
@@ -340,7 +416,22 @@ export class PlayerActor {
     const gaitFrameCount = sequences[gaitSequence]?.frameCount ?? 1
     const gaitFrame = gaitFrameCount > 1 ? ((this.gaitPhase % gaitFrameCount) + gaitFrameCount) % gaitFrameCount : 0
 
-    return { sequence, frame, gaitSequence, gaitFrame }
+    // Where along the aim sequence's blend axis this player is looking. The
+    // model declares the range that axis spans — -90..90 degrees of pitch for
+    // every `ref_aim_*` in the CS player models — so the view pitch maps
+    // straight onto it.
+    //
+    // Not from the entity's `blending[0]`, though it is on the wire and was
+    // the obvious candidate: for players the engine never transmits it, the
+    // client computes the aim blend locally in `StudioPlayerBlend`. Measured
+    // against the recorded view pitch it correlates at 0.02 — no relationship
+    // at all — and driving the torso from it doubles a player over while they
+    // are looking straight ahead.
+    const aim = sequences[sequence]
+    const span = aim ? aim.blendEnd - aim.blendStart : 0
+    const blend = span > 0.1 ? Math.min(Math.max((pose.pitch - aim.blendStart) / span, 0), 1) : 0.5
+
+    return { sequence, frame, gaitSequence, gaitFrame, blend }
   }
 
   private ensureModel(modelIndex: number): void {

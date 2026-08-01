@@ -436,7 +436,22 @@ for (const player of replay.players) {
   const sequence = Math.max(0, Math.min(Math.round(p.sequence), sequences.length - 1))
   const frameCount = sequences[sequence]?.frameCount ?? 1
   const BLEND = option('--blend', null)
-  instance.applyPose(sequence, (p.frame / 256) * Math.max(frameCount - 1, 0), 0, 0, BLEND === null ? p.blend : Number(BLEND))
+  // Drive the gait the way the viewer does. There is no accumulated phase in a
+  // still, so derive one from the timestamp: distance covered by now, over the
+  // ground one cycle of the sequence carries.
+  const gaitSequence = Math.max(0, Math.min(Math.round(p.gaitSequence), sequences.length - 1))
+  const gait = sequences[gaitSequence]
+  const stride = gait?.linearMovement?.[0] ?? 0
+  const gaitFrames = gait?.frameCount ?? 1
+  const phase = stride > 1 ? ((TIME * p.speed) / stride) * gaitFrames : TIME * (gait?.fps ?? 0)
+  const gaitFrame = gaitFrames > 1 ? ((phase % gaitFrames) + gaitFrames) % gaitFrames : 0
+  instance.applyPose(
+    sequence,
+    (p.frame / 256) * Math.max(frameCount - 1, 0),
+    gaitSequence,
+    gaitFrame,
+    BLEND === null ? Math.min(Math.max((p.pitch - (sequences[sequence]?.blendStart ?? -90)) / ((sequences[sequence]?.blendEnd ?? 90) - (sequences[sequence]?.blendStart ?? -90)), 0), 1) : Number(BLEND)
+  )
 
   // The weapon in hand: a `p_*.mdl` posed by bone-merging onto the player.
   const weaponPath = replay.models.get(p.weaponModelIndex)
@@ -446,9 +461,11 @@ for (const player of replay.players) {
 
   const holder = new THREE.Group()
   holder.position.copy(p.position)
+  // The body faces where the player is walking, not where they are looking.
+  const bodyYaw = p.speed > 12 ? p.moveYaw : p.yaw
   holder.quaternion
     .copy(QUAKE_TO_THREE)
-    .multiply(new THREE.Quaternion().setFromAxisAngle(UP_Z, THREE.MathUtils.degToRad(p.yaw)))
+    .multiply(new THREE.Quaternion().setFromAxisAngle(UP_Z, THREE.MathUtils.degToRad(bodyYaw)))
   holder.add(instance.root)
   if (weapon) holder.add(weapon.root)
   holder.updateMatrixWorld(true)

@@ -66,11 +66,24 @@ export interface MdlTexture {
   pixels: Uint8Array
 }
 
+/** One `mstudiobonecontroller_t`: an external dial wired to one bone channel. */
+export interface MdlBoneController {
+  bone: number
+  /** `STUDIO_X`..`STUDIO_ZR` bit naming the channel it drives. */
+  type: number
+  /** Value range the dial's 0..255 maps onto. */
+  start: number
+  end: number
+  /** Which of the entity's four controller slots writes to it. */
+  index: number
+}
+
 export interface Mdl {
   name: string
   bones: MdlBone[]
   sequences: MdlSequence[]
   bodyParts: MdlBodyPart[]
+  boneControllers: MdlBoneController[]
   textures: MdlTexture[]
   /** `skinFamilies[family][skinRef]` -> texture index. */
   skinFamilies: number[][]
@@ -79,6 +92,16 @@ export interface Mdl {
 }
 
 /** Texture flag: colours are additive/chrome rather than plain diffuse. */
+/** `mstudiobonecontroller_t.type`: which of the bone's six channels it drives. */
+export const STUDIO_CONTROLLER_CHANNEL: Record<number, number> = {
+  0x0001: 0, // X
+  0x0002: 1, // Y
+  0x0004: 2, // Z
+  0x0008: 3, // XR
+  0x0010: 4, // YR
+  0x0020: 5  // ZR
+}
+
 export const STUDIO_NF_CHROME = 0x02
 export const STUDIO_NF_ADDITIVE = 0x20
 export const STUDIO_NF_MASKED = 0x40
@@ -103,8 +126,6 @@ export function parseMdl(bytes: Uint8Array): Mdl {
   const boneOffset = r.i32()
   const boneControllerCount = r.i32()
   const boneControllerOffset = r.i32()
-  void boneControllerCount
-  void boneControllerOffset
   r.skip(8) // hit boxes
   const sequenceCount = r.i32()
   const sequenceOffset = r.i32()
@@ -117,6 +138,22 @@ export function parseMdl(bytes: Uint8Array): Mdl {
   const skinOffset = r.i32()
   const bodyPartCount = r.i32()
   const bodyPartOffset = r.i32()
+
+  // --- bone controllers ---
+  // How the engine twists a player's torso away from their legs: controllers
+  // 0..3 are wired to the spine bones, and the client writes the difference
+  // between where the player is looking and where they are walking into them.
+  const boneControllers: MdlBoneController[] = []
+  for (let i = 0; i < boneControllerCount; i++) {
+    const c = new ByteReader(bytes, boneControllerOffset + i * 24)
+    const bone = c.i32()
+    const type = c.i32()
+    const start = c.f32()
+    const end = c.f32()
+    c.skip(4) // rest value
+    const index = c.i32()
+    boneControllers.push({ bone, type, start, end, index })
+  }
 
   // --- bones ---
   const bones: MdlBone[] = []
@@ -236,7 +273,7 @@ export function parseMdl(bytes: Uint8Array): Mdl {
     skinFamilies.push(textures.map((_, i) => i))
   }
 
-  return { name, bones, sequences, bodyParts, textures, skinFamilies, bytes }
+  return { name, bones, sequences, bodyParts, boneControllers, textures, skinFamilies, bytes }
 }
 
 /** Studio textures are 8-bit paletted, with the 256-entry RGB palette inline. */

@@ -3,8 +3,8 @@ import {
   parseMdl,
   readAnimChannel,
   STUDIO_NF_ADDITIVE,
-  STUDIO_NF_CHROME,
   STUDIO_NF_MASKED,
+  STUDIO_CONTROLLER_CHANNEL,
   type Mdl,
   type MdlSequence
 } from './parser.ts'
@@ -89,8 +89,14 @@ export function buildStudioModel(bytes: Uint8Array): StudioModelData {
           at += 8
         }
 
+        // Reversed on the way out: GoldSrc winds a front face clockwise and
+        // renders studio models with `glCullFace(GL_FRONT)`, the opposite of
+        // OpenGL's default. Emitted as-authored, every triangle faces inward —
+        // measured at 100% of `p_m4a1.mdl` disagreeing with its own stored
+        // normals — so single-sided culling removes whichever half of a player
+        // is facing you.
         const emit = (a: number, b: number, c: number) => {
-          for (const index of [a, b, c]) {
+          for (const index of [a, c, b]) {
             const v = run[index]
             const vertexOffset = model.vertexOffset + v.position * 12
             const normalOffset = model.normalOffset + v.normal * 12
@@ -182,14 +188,18 @@ function createMaterial(mdl: Mdl, textureIndex: number): THREE.Material {
     transparent: additive,
     blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     alphaTest: (texture.flags & STUDIO_NF_MASKED) !== 0 ? 0.5 : 0,
-    // Chrome-mapped parts are environment reflections in the engine; plain
-    // diffuse is close enough and avoids a second UV set.
-    side: (texture.flags & STUDIO_NF_CHROME) !== 0 ? THREE.DoubleSide : THREE.FrontSide
+    // Both sides, always. Reversing the winding above fixes the bulk of these
+    // models, but roughly 30% of a player's triangles still disagree with
+    // their own smoothed normals — straps, fingers and other thin geometry —
+    // and any of those that culls is a hole in the figure.
+    side: THREE.DoubleSide
   } as THREE.MeshLambertMaterialParameters)
 }
 
 /** Bones at or below this one follow the upper-body sequence, not the gait. */
 const TORSO_ROOT = 'Bip01 Spine'
+
+const EMPTY_CONTROLLERS: readonly number[] = []
 
 export class StudioInstance {
   readonly root: THREE.Group
@@ -211,7 +221,7 @@ export class StudioInstance {
   private readonly quaternion = new THREE.Quaternion()
 
   /** Sequence metadata, so callers can map engine frame numbers onto clips. */
-  get sequenceInfo(): { label: string; frameCount: number; fps: number }[] {
+  get sequenceInfo(): readonly MdlSequence[] {
     return this.data.mdl.sequences
   }
 
@@ -266,7 +276,14 @@ export class StudioInstance {
    *                      aim sequences this is where they are looking, from
    *                      fully down to fully up
    */
-  applyPose(sequence: number, frame: number, gaitSequence: number, gaitFrame: number, blend = 0.5): void {
+  applyPose(
+    sequence: number,
+    frame: number,
+    gaitSequence: number,
+    gaitFrame: number,
+    blend = 0.5,
+    controllers: readonly number[] = EMPTY_CONTROLLERS
+  ): void {
     const { mdl } = this.data
     const upper = mdl.sequences[sequence] ?? mdl.sequences[0]
     const lower = mdl.sequences[gaitSequence] ?? upper
@@ -276,7 +293,7 @@ export class StudioInstance {
       const active = useGait ? lower : upper
       const activeFrame = useGait ? gaitFrame : frame
       // Locomotion has one blend; only the aim sequences span an axis.
-      this.poseBone(i, active, activeFrame, useGait ? 0.5 : blend)
+      this.poseBone(i, active, activeFrame, useGait ? 0.5 : blend, controllers)
     }
   }
 
@@ -304,7 +321,7 @@ export class StudioInstance {
         this.bones[i].position.copy(shared.position)
         this.bones[i].quaternion.copy(shared.quaternion)
       } else {
-        this.poseBone(i, idle, 0, 0.5)
+        this.poseBone(i, idle, 0, 0.5, EMPTY_CONTROLLERS)
       }
     }
   }
@@ -313,7 +330,8 @@ export class StudioInstance {
     boneIndex: number,
     sequence: MdlSequence | undefined,
     frame: number,
-    blend: number
+    blend: number,
+    controllers: readonly number[]
   ): void {
     const bone = this.data.mdl.bones[boneIndex]
     const target = this.bones[boneIndex]
@@ -366,6 +384,21 @@ export class StudioInstance {
         }
       }
       values[channel] = value
+    }
+
+    // External dials the entity drives, on top of the animation. Half-Life
+    // wires slots 0..3 to a player's spine to twist the torso away from the
+    // legs; Counter-Strike's own player models ship without them, so this is
+    // usually a no-op there and matters for the Half-Life models.
+    for (const controller of this.data.mdl.boneControllers) {
+      if (controller.bone !== boneIndex) continue
+      const channel = STUDIO_CONTROLLER_CHANNEL[controller.type]
+      if (channel === undefined) continue
+      const dial = controllers[controller.index]
+      if (dial === undefined) continue
+      const amount = controller.start + (controller.end - controller.start) * Math.min(Math.max(dial, 0), 1)
+      // Rotation channels are stored in radians, the controller range in degrees.
+      values[channel] += channel >= 3 ? THREE.MathUtils.degToRad(amount) : amount
     }
 
     this.position.set(values[0], values[1], values[2])

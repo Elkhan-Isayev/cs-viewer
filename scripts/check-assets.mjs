@@ -128,6 +128,36 @@ for (const folder of existsSync(playersDir) ? readdirSync(playersDir) : []) {
 
   const totalFrames = mdl.sequences.reduce((sum, s) => sum + s.frameCount, 0)
   check('animation data present', totalFrames > 50, `${totalFrames} frames across all sequences`)
+
+  // GoldSrc winds a studio front face clockwise and draws with
+  // `glCullFace(GL_FRONT)`. Emitted as authored, every triangle faces inward
+  // and single-sided culling removes whichever half of a model faces you.
+  const normal = data.geometry.getAttribute('normal')
+  let outward = 0
+  let inward = 0
+  const tri = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()]
+  const faceNormal = new THREE.Vector3()
+  const smoothed = new THREE.Vector3()
+  for (let i = 0; i + 2 < position.count; i += 3) {
+    for (let k = 0; k < 3; k++) tri[k].fromBufferAttribute(position, i + k)
+    faceNormal.subVectors(tri[1], tri[0]).cross(new THREE.Vector3().subVectors(tri[2], tri[0]))
+    if (faceNormal.lengthSq() < 1e-9) continue
+    smoothed.set(0, 0, 0)
+    for (let k = 0; k < 3; k++) smoothed.add(new THREE.Vector3().fromBufferAttribute(normal, i + k))
+    faceNormal.normalize().dot(smoothed.normalize()) > 0 ? outward++ : inward++
+  }
+  // Thin geometry — straps, fingers — legitimately disagrees with its own
+  // smoothed normals, so this never reaches 100% on a player. Emitting the
+  // authored winding scores around 30%, so the majority verdict separates the
+  // two cleanly; `p_m4a1.mdl`, being rigid, does reach 100%.
+  const outwardShare = (100 * outward) / (outward + inward)
+  check(
+    'triangles are wound outward',
+    outwardShare > 55,
+    `${outwardShare.toFixed(0)}% agree with their own normals, against ~30% unreversed`
+  )
+  const sided = data.materials.every((m) => m.side === THREE.DoubleSide)
+  check('model faces are drawn from both sides', sided, 'thin geometry disagrees with its smoothed normals')
 }
 
 // --- camera / replay integration -----------------------------------------
@@ -263,30 +293,60 @@ if (existsSync(demo)) {
     `${aim.length} aim sequences, ${aim[0]?.blendCount} blends each`
   )
 
+  // The models declare the range that axis spans, and the view pitch maps onto
+  // it. The entity's own `blending[0]` looks like the right source and is not:
+  // for players the engine never sends it, the client computes the blend
+  // locally, and driving the torso from the wire value bends a player double
+  // while they are looking straight ahead.
+  check(
+    'aim sequences declare their pitch range',
+    aim.every((s) => s.blendEnd - s.blendStart > 100),
+    `${aim[0]?.blendStart}..${aim[0]?.blendEnd} degrees`
+  )
   const { P_BLEND } = await import('../src/demo/replay.ts')
-  let levelish = 0, blendSamples = 0
-  const steepDown = [], steepUp = []
+  let sumBlend = 0, blendSamples = 0
   for (const player of replay.players) {
     for (let i = 0; i < player.track.count; i += 7) {
-      const blend = player.track.data[i * PLAYER_STRIDE + P_BLEND]
       const pitch = player.track.data[i * PLAYER_STRIDE + P_PITCH]
+      sumBlend += Math.abs(player.track.data[i * PLAYER_STRIDE + P_BLEND] / 255 - (pitch + 90) / 180)
       blendSamples++
-      if (Math.abs(blend - 128) < 32) levelish++
-      if (pitch > 25) steepDown.push(blend)
-      else if (pitch < -25) steepUp.push(blend)
     }
   }
-  const avg = (a) => a.reduce((s, v) => s + v, 0) / a.length
   check(
-    'the blend axis centres on a level aim',
-    levelish / blendSamples > 0.3,
-    `${((100 * levelish) / blendSamples).toFixed(0)}% of samples sit near 128 of 255`
+    'the wire blending[0] is not the aim blend',
+    sumBlend / blendSamples > 0.15,
+    `mean disagreement with the pitch-derived blend is ${(sumBlend / blendSamples).toFixed(2)} of full scale`
   )
-  // Pins which end of the axis is which: blend 0 is aiming fully up.
+
+  // Locomotion records how far one cycle carries the model, which is what lets
+  // the walk cycle be stepped by ground covered instead of a guessed rate —
+  // so walking, running and standing still each read as themselves.
+  const gaits = Object.fromEntries(
+    ['idle1', 'walk', 'run'].map((n) => [n, terror.sequences.find((s) => s.label === n)])
+  )
   check(
-    'looking down runs up the blend axis',
-    steepDown.length > 0 && steepUp.length > 0 && avg(steepDown) > avg(steepUp),
-    `down ${avg(steepDown).toFixed(0)} vs up ${avg(steepUp).toFixed(0)} of 255`
+    'walking and running carry different strides',
+    gaits.walk.linearMovement[0] > 1 && gaits.run.linearMovement[0] > gaits.walk.linearMovement[0] * 2,
+    `walk ${gaits.walk.linearMovement[0]}u per cycle, run ${gaits.run.linearMovement[0]}u`
+  )
+  check('the idle cycle stays in place', gaits.idle1.linearMovement[0] === 0, 'no linear movement')
+
+  // And the cycle has to actually move the legs.
+  const runner = new StudioInstance(buildStudioModel(
+    new Uint8Array(readFileSync(join(assets, 'models/player/terror/terror.mdl')))
+  ))
+  const runIndex = terror.sequences.indexOf(gaits.run)
+  const knee = runner.boneByName.get('Bip01 L Calf') ?? runner.boneByName.get('Bip01 L Thigh')
+  const legAt = (frame) => {
+    runner.applyPose(33, 0, runIndex, frame)
+    runner.root.updateMatrixWorld(true)
+    return new THREE.Vector3().setFromMatrixPosition(knee.matrixWorld)
+  }
+  const strideSwing = legAt(0).distanceTo(legAt(Math.floor(gaits.run.frameCount / 2)))
+  check(
+    'the run cycle swings the legs',
+    strideSwing > 4,
+    `knee travels ${strideSwing.toFixed(1)} units between opposite ends of the cycle`
   )
 
   // Anyone still unassigned at a round start has no `modelindex` yet, and
