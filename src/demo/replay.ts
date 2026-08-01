@@ -1,7 +1,18 @@
 import { ByteReader } from '../core/ByteReader.ts'
 import { netMsgPayload, nextFrameOffset, readDirectory, readFrameHeader, readHeader } from './container.ts'
 import { createDeltaTable } from './delta.ts'
-import { parseNetMessages, RESOURCE_MODEL, type EntityUpdate, type ParserState, type UserMessageDef } from './messages.ts'
+import {
+  parseNetMessages,
+  RESOURCE_EVENT,
+  RESOURCE_MODEL,
+  RESOURCE_SOUND,
+  type EntityUpdate,
+  type EventCue,
+  type ParserState,
+  type SoundCue,
+  type UserMessageDef
+} from './messages.ts'
+import { soundForEvent } from './events.ts'
 import { SampleTrack } from './track.ts'
 import { FrameType, type ChatLine, type KillEvent, type RoundMarker } from './types.ts'
 
@@ -65,6 +76,23 @@ export interface Replay {
   kills: KillEvent[]
   chat: ChatLine[]
   rounds: RoundMarker[]
+  /** Everything audible, in playback order. */
+  sounds: SoundEvent[]
+}
+
+/** One sample to play back: a resolved path plus where and how loud. */
+export interface SoundEvent {
+  time: number
+  /** Path under the game's `sound/` directory, e.g. `weapons/ak47-1.wav`. */
+  path: string
+  /** Entity that emitted it; player slots are 1..maxPlayers, 0 is the world. */
+  entity: number
+  /** Emission point in Quake coordinates, when the server sent one. */
+  origin: [number, number, number] | null
+  /** 0..1. */
+  volume: number
+  /** Playback rate multiplier; the wire carries 100 for "unshifted". */
+  pitch: number
 }
 
 export interface ParseProgress {
@@ -144,7 +172,12 @@ export function parseReplay(bytes: Uint8Array, onProgress?: (p: ParseProgress) =
   }
 
   const models = new Map<number, string>()
+  const soundNames = new Map<number, string>()
+  const eventNames = new Map<number, string>()
+  const sounds: SoundEvent[] = []
   const live = new Map<number, LiveEntity>()
+  /** Entity numbers of the current packet, ascending — see `applyUpdates`. */
+  const packetOrder: number[] = []
   const playerTracks = new Map<number, SampleTrack>()
   const identities = new Map<number, { name: string; steamId: string; model: string; hltv: boolean }>()
   const teams = new Map<number, number>()
@@ -194,6 +227,13 @@ export function parseReplay(bytes: Uint8Array, onProgress?: (p: ParseProgress) =
       // every entity to the world origin for the first frames.
       if (entity.hasOrigin) recordSample(update.entityIndex, entity)
     }
+
+    // Rebuild the array an event's `packetIndex` refers to. The engine writes
+    // packet entities in ascending entity-number order and reconstructs them in
+    // the same order, so the live set sorted by number *is* that array.
+    packetOrder.length = 0
+    for (const index of live.keys()) packetOrder.push(index)
+    packetOrder.sort((a, b) => a - b)
   }
 
   const recordSample = (index: number, entity: LiveEntity): void => {
@@ -295,6 +335,43 @@ export function parseReplay(bytes: Uint8Array, onProgress?: (p: ParseProgress) =
     },
     onResource: (type: number, index: number, name: string) => {
       if (type === RESOURCE_MODEL) models.set(index, name)
+      else if (type === RESOURCE_SOUND) soundNames.set(index, name)
+      else if (type === RESOURCE_EVENT) eventNames.set(index, name)
+    },
+    onSound: (cue: SoundCue) => {
+      // Sentences (`!DOOR_OPEN`) index a phoneme script rather than a file;
+      // nothing plays them here.
+      if (cue.sentence) return
+      const path = soundNames.get(cue.index)
+      if (!path) return
+      sounds.push({
+        time: frameTime,
+        path,
+        entity: cue.entity,
+        origin: cue.origin,
+        volume: cue.volume,
+        pitch: cue.pitch / 100
+      })
+    },
+    onEvent: (cue: EventCue) => {
+      const script = eventNames.get(cue.index)
+      // Seeded from the cue so the same demo always sounds the same.
+      const path = script ? soundForEvent(script, frameTime * 1000 + cue.packetIndex) : null
+      if (!path) return
+      sounds.push({
+        time: frameTime + cue.delay,
+        path,
+        // Weapon events carry no `entindex`; the shooter is the entity at
+        // `packetIndex` in the packet just sent. Cross-checked against the
+        // weapon each player was holding: 84% of gunfire in the sample demo
+        // lands on someone carrying exactly that gun, against 21% for the
+        // tempting `packetIndex + 1`. The rest is `weaponmodel` lagging a
+        // switch, and shots from entities that are not players.
+        entity: cue.entity || packetOrder[cue.packetIndex] || 0,
+        origin: cue.origin,
+        volume: 1,
+        pitch: 1
+      })
     },
     onUserInfo: (slot: number, raw: string) => {
       if (!raw) {
@@ -374,7 +451,8 @@ export function parseReplay(bytes: Uint8Array, onProgress?: (p: ParseProgress) =
     models,
     kills,
     chat,
-    rounds
+    rounds,
+    sounds: sounds.sort((a, b) => a.time - b.time)
   }
 }
 

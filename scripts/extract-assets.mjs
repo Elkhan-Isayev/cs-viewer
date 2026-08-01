@@ -37,12 +37,13 @@ const zip = openContentSource({
 console.log(`Reading ${zip.label}`)
 
 let written = 0
-function emit(relativePath, buffer) {
+function emit(relativePath, buffer, quiet = false) {
   const target = join(assetsDir, relativePath)
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, buffer)
   written++
-  console.log(`  ${relativePath.padEnd(46)} ${(buffer.length / 1024).toFixed(0).padStart(7)} KiB`)
+  // Sounds run to a couple of thousand files; a per-file line buries the rest.
+  if (!quiet) console.log(`  ${relativePath.padEnd(46)} ${(buffer.length / 1024).toFixed(0).padStart(7)} KiB`)
 }
 
 /**
@@ -219,6 +220,28 @@ console.log('\nWeapon models:')
 for (const name of zip.list((n) => /^cstrike\/models\/[pw]_[a-z0-9_]+\.mdl$/.test(n))) {
   emit(`models/${name.split('/').pop()}`, zip.read(name))
 }
+
+// Sounds. Demos reference these by the path the server precached, so the
+// layout under `assets/sound/` has to mirror the game's own. `ambience` and
+// `music` are the map's looping backdrop, started by `svc_spawnstaticsound`
+// which the viewer never plays, and `vox`/`fvox` are Half-Life's announcer —
+// together two thirds of the bytes and none of the gunfire.
+const SKIP_SOUND_DIRS = /^(ambience|music|storm|vox|fvox)\//
+console.log('\nSounds:')
+const soundsSeen = new Set()
+let soundBytes = 0
+// `valve` first so that Counter-Strike's own copies win where both ship one.
+for (const root of ['valve/sound/', 'cstrike/sound/']) {
+  for (const name of zip.list((n) => n.startsWith(root) && n.endsWith('.wav'))) {
+    const relative = name.slice(root.length)
+    if (SKIP_SOUND_DIRS.test(relative)) continue
+    const bytes = zip.read(name)
+    soundBytes += bytes.length
+    soundsSeen.add(relative)
+    emit(`sound/${relative}`, bytes, true)
+  }
+}
+console.log(`  ${soundsSeen.size} samples, ${(soundBytes / 1e6).toFixed(1)} MB`)
 
 zip.close()
 console.log(`\nWrote ${written} files to public/assets/`)

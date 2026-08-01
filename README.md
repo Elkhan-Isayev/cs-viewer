@@ -51,6 +51,7 @@ with a browser.
 | 🗺 **The actual map** | The `.bsp` rendered with its own textures, **baked lightmaps** and skybox. |
 | 🧍 **The actual player models** | Half-Life studio models, GPU-skinned: legs on the walk cycle, torso on the aiming animation, interpolated between keyframes. |
 | 🔫 **The weapon they were holding** | The `p_*.mdl` bone-merged onto the player's arm, exactly as GoldSrc does it — so the gun tracks the hand through every reload. |
+| 🔊 **Sound** | Gunfire, footsteps, reloads, hits and deaths, positioned in the world and panned from the camera. |
 | ⏯ **Full transport** | Play/pause, scrub, 0.25×–8× speed, jump between players. |
 | 📋 **Match context** | Roster by team, kill feed and round outcomes, recovered from the demo's own messages. |
 | 🧩 **Embeddable** | One ES module, shadow-DOM isolated, with a small API. Drops onto any page. |
@@ -75,7 +76,7 @@ CDN on another origin.
 
 ### 2. Host the game assets
 
-The viewer needs the map and player models. Extract them once (see
+The viewer needs the map, the player models and the sounds. Extract them once (see
 [Getting the game content](#getting-the-game-content)) and serve `public/assets/` from
 anywhere — your own origin, a bucket, a CDN. Point `assets` at it.
 
@@ -131,13 +132,14 @@ height.
 | Option | Default | |
 |---|---|---|
 | `demo` | — | URL, `File`/`Blob`, or raw bytes. Omit and call `load()` later. |
-| `assets` | `/assets` | Base URL serving `maps/`, `models/`, `env/`. |
+| `assets` | `/assets` | Base URL serving `maps/`, `models/`, `env/`, `sound/`. |
 | `autoplay` | `true` | Start playing once ready. |
 | `mode` | `'third-person'` | Also `'eye'`, `'free'`. |
 | `follow` | first player | Player slot to follow. |
 | `startTime` | `0` | Seconds into the recording. |
 | `speed` | `1` | Playback rate. |
 | `brightness` | `1.1` | Map lighting multiplier. |
+| `volume` | `0.7` | Sound volume, 0 to 1. `0` starts muted. |
 | `controls` | `true` | Built-in transport bar. |
 | `roster` | `true` | Team roster and kill feed. |
 | `nameTags` | `true` | Floating names above players. |
@@ -152,6 +154,7 @@ viewer.seek(seconds)
 viewer.setSpeed(rate)
 viewer.setMode('third-person' | 'eye' | 'free')
 viewer.setBrightness(value)
+viewer.setVolume(value)   // 0..1
 viewer.follow(slot)
 viewer.players()         // [{ slot, name, team }]
 viewer.currentTime / duration / isPlaying
@@ -162,6 +165,11 @@ viewer.on('ready' | 'progress' | 'error' | 'timeupdate' | 'play' | 'pause' | 'fo
 
 Every `on()` call returns an unsubscribe function. TypeScript declarations ship in
 `dist-lib/types/`.
+
+> **Sound needs a gesture.** Browsers keep an `AudioContext` suspended until the user
+> interacts with the page, so a replay that autoplays starts silent and turns itself on at
+> the first click, keypress or drag anywhere in the widget. Nothing to wire up — but it is
+> why the first second or two of an autoplaying match has no audio.
 
 ---
 
@@ -419,15 +427,17 @@ which now pulls `gfx/env/<skyname>*` alongside the map.
 
 ## Limits
 
-- **No audio at all.** Nothing is played: no gunfire, footsteps or radio. Gunfire is the
-  awkward one — CS fires weapons through HL *events* (`events/ak47.sc`) that the client
-  turns into a sound locally, so a demo carries the event index and not the `.wav`. Wiring
-  it up means mapping the precached event list onto sound names by hand, then extracting
-  `cstrike/sound/` and playing it back positionally. `readSound` in
-  `src/demo/messages.ts` currently walks `svc_sound` and discards it.
+- **Gunfire is attributed to the right player about 83% of the time.** CS fires weapons
+  through HL *events*, which name the shooter by their slot in the packet just sent rather
+  than by entity number, so the viewer rebuilds that array to resolve them. The rest are
+  shots whose `weaponmodel` had not caught up with a weapon switch, or that came from
+  something that is not a player; those play from the listener instead of from a point.
+- **Radio calls and map ambience are silent.** Radio is a `SendAudio` user message rather
+  than a sound cue, and ambience arrives as `svc_spawnstaticsound`, which nothing handles.
+  Sentences (`!DOOR_OPEN`) index a phoneme script and are skipped.
 - **No muzzle flashes, grenades or bomb entities.** Non-player entities are decoded but
   not sampled or drawn — `recordSample` in `src/demo/replay.ts` is the place to extend.
-  Weapon *models* are drawn; only the effects around them are missing.
+  Weapon *models* are drawn and audible; only the visual effects around them are missing.
 - **Only demo protocol 5 / network protocol 48** — CS 1.6 and Half-Life era GoldSrc.
   CS:GO and CS2 demos are a completely different (protobuf) format.
 - Round markers come from `TextMsg` tokens, so they reflect what the server broadcast;

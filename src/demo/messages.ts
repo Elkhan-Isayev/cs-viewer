@@ -68,7 +68,53 @@ export const SVC = {
 export type SVC = (typeof SVC)[keyof typeof SVC]
 
 /** Resource kinds in `svc_resourcelist`. */
+export const RESOURCE_SOUND = 0
 export const RESOURCE_MODEL = 2
+export const RESOURCE_EVENT = 5
+
+/** `SND_*` bits in the `svc_sound` flag word. */
+const SND_VOLUME = 1 << 0
+const SND_ATTENUATION = 1 << 1
+const SND_LARGE_INDEX = 1 << 2
+const SND_PITCH = 1 << 3
+const SND_SENTENCE = 1 << 4
+const SND_STOP = 1 << 5
+
+/** One `svc_sound`: the server telling the client to play a precached sample. */
+export interface SoundCue {
+  /** Index into the sound precache, or a sentence index when `sentence` is set. */
+  index: number
+  sentence: boolean
+  /** Entity the sound is attached to; player slots are 1..maxPlayers. */
+  entity: number
+  /** Emission point, when the server bothered to send one. */
+  origin: [number, number, number] | null
+  /** 0..1. */
+  volume: number
+  /** 100 is unshifted. */
+  pitch: number
+}
+
+/** One entry of an `svc_event`: a client-side effect script the server fired. */
+export interface EventCue {
+  /** Index into the event precache (`events/*.sc`). */
+  index: number
+  /** Entity that fired it, when the delta carried one — usually it does not. */
+  entity: number
+  /**
+   * Slot of the firing entity within the last packet's entity array, or -1.
+   *
+   * This, not `entindex`, is how the engine identifies a shooter: the server
+   * writes the position the entity occupies in the packet it just sent, and the
+   * client looks it up in the array it just rebuilt. Packet entities go out in
+   * ascending entity-number order and players hold the low numbers, so for a
+   * player-fired weapon this resolves to `packetIndex + 1`.
+   */
+  packetIndex: number
+  origin: [number, number, number] | null
+  /** Seconds the client should wait before playing it. */
+  delay: number
+}
 
 export interface UserMessageDef {
   index: number
@@ -99,6 +145,8 @@ export interface MessageSink {
   onUserMessage?(def: UserMessageDef, payload: Uint8Array): void
   onPrint?(text: string): void
   onDirector?(payload: Uint8Array): void
+  onSound?(sound: SoundCue): void
+  onEvent?(event: EventCue): void
   /** Diagnostics: fired for every message with the byte range it consumed. */
   onMessage?(type: number, start: number, end: number): void
 }
@@ -155,7 +203,7 @@ function readServerMessage(r: ByteReader, type: number, state: ParserState, sink
       return
 
     case SVC.EVENT:
-      readEvents(r, state)
+      readEvents(r, state, sink)
       return
 
     case SVC.VERSION:
@@ -167,7 +215,7 @@ function readServerMessage(r: ByteReader, type: number, state: ParserState, sink
       return
 
     case SVC.SOUND:
-      readSound(r)
+      readSound(r, sink)
       return
 
     case SVC.TIME: {
@@ -436,31 +484,54 @@ function readServerInfo(r: ByteReader, state: ParserState, sink: MessageSink): v
   sink.onServerInfo?.({ maxPlayers, mapFileName, hostName })
 }
 
-function readSound(r: ByteReader): void {
+function readSound(r: ByteReader, sink: MessageSink): void {
   const bs = new BitReader(r.bytes, r.offset)
   const flags = bs.read(9)
-  if (flags & 1) bs.skip(8) // volume
-  if (flags & 2) bs.skip(8) // attenuation
+  const volume = flags & SND_VOLUME ? bs.read(8) / 255 : 1
+  if (flags & SND_ATTENUATION) bs.skip(8)
   bs.skip(3) // channel
-  bs.skip(11) // entity index
-  bs.skip(flags & 4 ? 16 : 8) // sound index
+  const entity = bs.read(11)
+  const index = bs.read(flags & SND_LARGE_INDEX ? 16 : 8)
+
   // Each axis is present only if its flag bit is set.
-  const axes = [bs.read(1), bs.read(1), bs.read(1)]
-  for (const present of axes) if (present) bs.readCoord()
-  if (flags & 8) bs.skip(8) // pitch
+  const present = [bs.read(1), bs.read(1), bs.read(1)]
+  const coords = present.map((flag) => (flag ? bs.readCoord() : 0))
+  const origin = present.some(Boolean) ? ([coords[0], coords[1], coords[2]] as [number, number, number]) : null
+
+  const pitch = flags & SND_PITCH ? bs.read(8) : 100
   r.seek(bs.byteAlignedEnd())
+
+  // `SND_STOP` silences a channel rather than starting anything.
+  if (!(flags & SND_STOP)) {
+    sink.onSound?.({ index, sentence: (flags & SND_SENTENCE) !== 0, entity, origin, volume, pitch })
+  }
 }
 
-function readEvents(r: ByteReader, state: ParserState): void {
+function readEvents(r: ByteReader, state: ParserState, sink: MessageSink): void {
   const bs = new BitReader(r.bytes, r.offset)
   const count = bs.read(5)
   for (let i = 0; i < count; i++) {
-    bs.skip(10) // event index
+    const index = bs.read(10)
+    let args: Record<string, number | string> | null = null
+    // Identifies the firing entity by its slot in the last packet's entity
+    // list rather than by number. See `EventCue.packetIndex`.
+    let packetIndex = -1
     if (bs.read(1)) {
-      bs.skip(11) // packet index
-      if (bs.read(1)) readDelta(bs, state.deltas.event_t)
+      packetIndex = bs.read(11)
+      if (bs.read(1)) args = readDelta(bs, state.deltas.event_t)
     }
-    if (bs.read(1)) bs.skip(16) // fire time
+    // Sent as 1/100ths of a second.
+    const delay = bs.read(1) ? bs.read(16) / 100 : 0
+
+    const at = (key: string): number => (typeof args?.[key] === 'number' ? (args[key] as number) : 0)
+    const hasOrigin = args !== null && ('origin[0]' in args || 'origin[1]' in args || 'origin[2]' in args)
+    sink.onEvent?.({
+      index,
+      entity: at('entindex'),
+      packetIndex,
+      origin: hasOrigin ? [at('origin[0]'), at('origin[1]'), at('origin[2]')] : null,
+      delay
+    })
   }
   r.seek(bs.byteAlignedEnd())
 }

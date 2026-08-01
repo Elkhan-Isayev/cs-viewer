@@ -7,7 +7,7 @@
 import { parseReplay, type Replay } from './replay.ts'
 import { serializeTrack, type SerialTrack } from './track.ts'
 import type { ChatLine, KillEvent, RoundMarker } from './types.ts'
-import type { TeamChange } from './replay.ts'
+import type { SoundEvent, TeamChange } from './replay.ts'
 
 export interface WorkerRequest {
   bytes: ArrayBuffer
@@ -35,6 +35,7 @@ export type WorkerResponse =
       kills: KillEvent[]
       chat: ChatLine[]
       rounds: RoundMarker[]
+      sounds: SoundEvent[]
     }
   | { type: 'error'; message: string }
 
@@ -74,7 +75,8 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
         models: [...replay.models],
         kills: replay.kills,
         chat: replay.chat,
-        rounds: replay.rounds
+        rounds: replay.rounds,
+        sounds: replay.sounds
       },
       transfers
     )

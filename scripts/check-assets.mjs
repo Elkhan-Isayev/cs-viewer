@@ -238,6 +238,62 @@ if (existsSync(demo)) {
     flash.distanceTo(grip) > 1,
     `muzzle sits ${flash.distanceTo(grip).toFixed(1)} units from the grip`
   )
+
+  console.log('\nsound against demo.dem')
+  const cues = replay.sounds
+  check('the demo yields sound cues', cues.length > 1000, `${cues.length} cues`)
+  check(
+    'cues are in playback order',
+    cues.every((cue, i) => i === 0 || cues[i - 1].time <= cue.time),
+    'the audio engine walks them with a cursor'
+  )
+
+  // Gunfire comes from events, everything else from svc_sound. Both have to
+  // resolve to a file that is actually served, or it is silent in practice.
+  const cueSamples = [...new Set(cues.map((cue) => cue.path))]
+  const unserved = cueSamples.filter((path) => !existsSync(join(assets, 'sound', path)))
+  check(
+    'every referenced sample is on disk',
+    unserved.length === 0,
+    unserved.length ? unserved.slice(0, 5).join(', ') : `${cueSamples.length} distinct samples`
+  )
+
+  const gunfire = cues.filter((cue) => !cue.origin)
+  check('weapon events resolve to a fire sound', gunfire.length > 1000, `${gunfire.length} shots`)
+
+  // The shooter is the entity at `packetIndex` in the packet just sent. If that
+  // reconstruction drifts, gunfire detaches and plays from the wrong place —
+  // which is silent failure, so pin the agreement rate down.
+  const fired = /^weapons\/([a-z0-9]+?)(_unsil)?-?\d?\.wav$/
+  const bySlot = new Map(replay.players.map((p) => [p.slot, p]))
+  let attributed = 0
+  for (const cue of gunfire) {
+    const match = fired.exec(cue.path)
+    const player = match && bySlot.get(cue.entity)
+    if (!player) continue
+    samplePlayer(player, cue.time, pose)
+    if ((replay.models.get(pose.weaponModelIndex) ?? '').includes(match[1])) attributed++
+  }
+  const rate = (100 * attributed) / gunfire.length
+  check(
+    'gunfire is attributed to the player holding that weapon',
+    rate > 75,
+    `${rate.toFixed(1)}% — reading packetIndex as an entity number scores 21%`
+  )
+
+  // Positioning falls back to the emitting player, so a cue with neither an
+  // origin nor a resolvable entity plays flat and out of place.
+  let placeable = 0
+  for (const cue of cues) {
+    if (cue.origin) { placeable++; continue }
+    const player = bySlot.get(cue.entity)
+    if (player && samplePlayer(player, cue.time, pose).present) placeable++
+  }
+  check(
+    'cues can be placed in the world',
+    placeable / cues.length > 0.95,
+    `${((100 * placeable) / cues.length).toFixed(1)}% positioned`
+  )
 }
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)

@@ -7,10 +7,12 @@ import { buildSkybox, loadSkyFaces, type Skybox } from './skybox.ts'
 import type { Replay, ReplayPlayer } from '../demo/replay.ts'
 import { CameraRig, type CameraMode } from './cameraRig.ts'
 import { createPose, ModelLibrary, PlayerActor, samplePlayer, type PlayerPose } from './players.ts'
+import { ReplayAudio } from './audio.ts'
 
 export interface ViewerOptions {
   canvas: HTMLCanvasElement
   assetBaseUrl: string
+  volume: number
 }
 
 /**
@@ -35,6 +37,7 @@ export class Viewer {
   private sky: Skybox | null = null
   private hull: Hull | null = null
   private replay: Replay | null = null
+  readonly audio: ReplayAudio
 
   /** Slot of the player the camera follows, or null for a free look. */
   followSlot: number | null = null
@@ -70,6 +73,7 @@ export class Viewer {
     this.scene.add(key)
 
     this.library = new ModelLibrary(options.assetBaseUrl)
+    this.audio = new ReplayAudio({ baseUrl: options.assetBaseUrl, volume: options.volume })
     this.rig = new CameraRig(this.aspect)
     this.resize()
   }
@@ -149,6 +153,7 @@ export class Viewer {
       this.scene.add(actor.root)
     }
     this.followSlot ??= replay.players[0]?.slot ?? null
+    this.audio.setReplay(replay.sounds, 0)
   }
 
   /** Points the camera at a player, cutting rather than sweeping to them. */
@@ -258,6 +263,14 @@ export class Viewer {
     // Keep the backdrop centred on the camera so it never moves relative to it.
     if (this.sky) this.sky.mesh.position.copy(this.rig.camera.position)
     this.renderer.render(this.scene, this.rig.camera)
+
+    // After the render, so the camera's world matrix is the one just drawn
+    // from. Cues attached to a player carry no coordinates, so they are
+    // placed at wherever that player is standing this frame.
+    this.audio.update(time, this.rig.camera, (entity) => {
+      const actor = this.actors.get(entity)
+      return actor && actor.root.visible ? actor.root.position : null
+    })
   }
 
   start(getTime: () => number): void {
@@ -280,6 +293,7 @@ export class Viewer {
     this.map?.dispose()
     this.sky?.dispose()
     for (const actor of this.actors.values()) actor.dispose()
+    this.audio.dispose()
     this.renderer.dispose()
   }
 }

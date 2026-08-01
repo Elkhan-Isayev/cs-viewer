@@ -26,6 +26,11 @@ export interface CsViewerOptions {
   speed?: number
   /** Map lighting multiplier. Default `1.1`. */
   brightness?: number
+  /**
+   * Sound volume, 0 to 1. Default `0.7`; pass `0` to start muted.
+   * Playback needs `sound/` served alongside `maps/` and `models/`.
+   */
+  volume?: number
   /** Show the transport bar. Default `true`. */
   controls?: boolean
   /** Show the team roster and kill feed. Default `true`. */
@@ -70,6 +75,7 @@ const DEFAULTS = {
   startTime: 0,
   speed: 1,
   brightness: 1.1,
+  volume: 0.7,
   controls: true,
   roster: true,
   nameTags: true,
@@ -111,6 +117,8 @@ export class CsViewer {
     scrubber: HTMLInputElement
     speed: HTMLSelectElement
     brightness: HTMLInputElement
+    mute: HTMLButtonElement
+    volume: HTMLInputElement
     mode: HTMLSelectElement
     follow: HTMLSelectElement
   }
@@ -124,6 +132,8 @@ export class CsViewer {
   private destroyed = false
   private readonly held = new Set<string>()
   private lastFreeTick = performance.now()
+  /** Volume to come back to when unmuting. */
+  private mutedFrom = 0.7
   private resizeObserver: ResizeObserver | null = null
 
   constructor(element: HTMLElement, options: CsViewerOptions = {}) {
@@ -139,7 +149,11 @@ export class CsViewer {
     this.shadow.append(style)
 
     this.ui = this.buildDom()
-    this.viewer = new Viewer({ canvas: this.ui.canvas, assetBaseUrl: this.options.assets })
+    this.viewer = new Viewer({
+      canvas: this.ui.canvas,
+      assetBaseUrl: this.options.assets,
+      volume: this.options.volume
+    })
     this.viewer.showNameTags = this.options.nameTags
     this.viewer.setMode(this.options.mode)
     // The viewer moves the camera off players who leave the world; keep the
@@ -181,7 +195,8 @@ export class CsViewer {
       models: new Map(parsed.models),
       kills: parsed.kills,
       chat: parsed.chat,
-      rounds: parsed.rounds
+      rounds: parsed.rounds,
+      sounds: parsed.sounds
     }
 
     this.setProgress(0.75, `Loading ${this.replay.mapName}`)
@@ -219,6 +234,9 @@ export class CsViewer {
     this.playing = true
     this.lastTick = performance.now()
     this.ui.play.textContent = '❚❚'
+    // An AudioContext starts suspended and only a user gesture may resume it.
+    // Pressing play is that gesture; calling it earlier is silently ignored.
+    this.viewer.audio.resume()
     this.emit('play', undefined as never)
   }
 
@@ -226,6 +244,7 @@ export class CsViewer {
     if (!this.playing) return
     this.playing = false
     this.ui.play.textContent = '▶'
+    this.viewer.audio.suspend()
     this.emit('pause', undefined as never)
   }
 
@@ -254,6 +273,13 @@ export class CsViewer {
   setBrightness(value: number): void {
     this.viewer.setBrightness(value)
     this.ui.brightness.value = String(value)
+  }
+
+  /** Sound volume, 0 to 1. */
+  setVolume(value: number): void {
+    this.viewer.audio.setVolume(value)
+    this.ui.volume.value = String(value)
+    this.ui.mute.textContent = value > 0 ? '🔊' : '🔇'
   }
 
   follow(slot: number): void {
@@ -547,6 +573,13 @@ export class CsViewer {
     const canvas = this.ui.canvas
     let dragging = false
 
+    // With `autoplay` on nobody ever presses play, so the AudioContext would
+    // stay suspended for the whole match. Any interaction with the widget is a
+    // good enough gesture to start it.
+    const wake = () => this.viewer.audio.resume()
+    this.shadow.addEventListener('pointerdown', wake)
+    this.shadow.addEventListener('keydown', wake)
+
     canvas.addEventListener('pointerdown', (event) => {
       dragging = true
       canvas.setPointerCapture(event.pointerId)
@@ -582,6 +615,16 @@ export class CsViewer {
     this.ui.brightness.addEventListener('input', () =>
       this.viewer.setBrightness(Number(this.ui.brightness.value))
     )
+    this.ui.volume.addEventListener('input', () => this.setVolume(Number(this.ui.volume.value)))
+    this.ui.mute.addEventListener('click', () => {
+      // Remember the level so unmuting restores it rather than guessing.
+      if (this.viewer.audio.volume > 0) {
+        this.mutedFrom = this.viewer.audio.volume
+        this.setVolume(0)
+      } else {
+        this.setVolume(this.mutedFrom)
+      }
+    })
     this.ui.mode.addEventListener('change', () => this.setMode(this.ui.mode.value as CameraMode))
     this.ui.follow.addEventListener('change', () => this.follow(Number(this.ui.follow.value)))
 
@@ -658,6 +701,18 @@ export class CsViewer {
     brightness.value = String(this.options.brightness)
     brightness.title = 'Brightness'
 
+    const mute = el('button', 'icon-button') as HTMLButtonElement
+    mute.type = 'button'
+    mute.textContent = this.options.volume > 0 ? '🔊' : '🔇'
+    mute.title = 'Mute / unmute'
+    const volume = el('input', 'brightness') as HTMLInputElement
+    volume.type = 'range'
+    volume.min = '0'
+    volume.max = '1'
+    volume.step = '0.05'
+    volume.value = String(this.options.volume)
+    volume.title = 'Volume'
+
     const controls = el('footer', 'controls')
     controls.hidden = true
     controls.append(
@@ -665,6 +720,8 @@ export class CsViewer {
       time,
       scrubber,
       duration,
+      mute,
+      volume,
       labelled('Speed', speed, true),
       labelled('Light', brightness, true),
       labelled('View', mode, false),
@@ -676,7 +733,7 @@ export class CsViewer {
     return {
       canvas, loading, loadingBar, loadingStage, error, errorText,
       sidebar, matchMap, matchServer, roster, feedTitle, feed, banner,
-      controls, play, time, duration, scrubber, speed, brightness, mode, follow
+      controls, play, time, duration, scrubber, speed, brightness, mute, volume, mode, follow
     }
   }
 }
