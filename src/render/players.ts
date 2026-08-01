@@ -37,6 +37,17 @@ const SPIN = new THREE.Quaternion()
 /** Model folder names that belong to the Terrorist side. */
 const T_MODELS = new Set(['terror', 'leet', 'arctic', 'guerilla'])
 
+/** Height above the player's origin that the name tag floats at. */
+const TAG_HEIGHT = 82
+/**
+ * Share of the viewport's height one tag occupies, held constant with
+ * distance. Sized in world units instead, a tag is unreadably small across the
+ * map and swallows the screen when the camera is close.
+ */
+const TAG_SCREEN_FRACTION = 0.022
+/** Past this the tag is clutter rather than information. */
+const TAG_MAX_DISTANCE = 2600
+
 export interface PlayerPose {
   present: boolean
   position: THREE.Vector3
@@ -177,12 +188,17 @@ export class ModelLibrary {
  * the replay's sampled pose.
  */
 export class PlayerActor {
+  /** Positioned, never rotated — so the name tag stays overhead. */
   readonly root = new THREE.Group()
+  /** Carries the Quake-to-scene rotation and the player's yaw. */
+  private readonly body = new THREE.Group()
   private instance: StudioInstance | null = null
   private currentModelPath = ''
   private weapon: StudioInstance | null = null
   private currentWeaponPath = ''
   private readonly label: THREE.Sprite
+  /** Canvas size of the tag, in pixels, for the constant-size maths. */
+  private readonly labelPixels: { width: number; height: number }
   /** Accumulated walk-cycle phase, advanced by how fast the player is moving. */
   private gaitPhase = 0
   private readonly fallback: THREE.Mesh
@@ -195,8 +211,13 @@ export class PlayerActor {
     this.player = player
     this.library = library
     this.replay = replay
+    this.root.add(this.body)
+
     this.label = createNameTag(player.name, TEAM_COLORS[player.team] ?? TEAM_COLORS[0])
-    this.label.position.set(0, 80, 0)
+    this.labelPixels = { width: this.label.scale.x, height: this.label.scale.y }
+    // On `root`, not `body`: the tag must hang above the player's head rather
+    // than swing around them as they turn.
+    this.label.position.set(0, TAG_HEIGHT, 0)
     this.root.add(this.label)
 
     // Shown until the real model arrives, and if it never does.
@@ -227,7 +248,7 @@ export class PlayerActor {
     // Studio models are authored in Quake space (Z-up, facing +X). Rotate about
     // the model's own Z by the yaw, then map Quake axes onto the Y-up scene.
     SPIN.setFromAxisAngle(UP_Z, THREE.MathUtils.degToRad(pose.yaw))
-    this.root.quaternion.copy(QUAKE_TO_THREE).multiply(SPIN)
+    this.body.quaternion.copy(QUAKE_TO_THREE).multiply(SPIN)
 
     this.ensureModel(pose.modelIndex)
 
@@ -256,7 +277,7 @@ export class PlayerActor {
     // resolve to nothing; drop whatever was in hand rather than leaving it.
     if (!path || !path.includes('/p_')) {
       if (this.weapon) {
-        this.root.remove(this.weapon.root)
+        this.body.remove(this.weapon.root)
         this.weapon.dispose()
         this.weapon = null
       }
@@ -269,11 +290,11 @@ export class PlayerActor {
     void this.library.load(path).then((data) => {
       if (!data || this.currentWeaponPath !== path) return
       if (this.weapon) {
-        this.root.remove(this.weapon.root)
+        this.body.remove(this.weapon.root)
         this.weapon.dispose()
       }
       this.weapon = new StudioInstance(data)
-      this.root.add(this.weapon.root)
+      this.body.add(this.weapon.root)
     })
   }
 
@@ -303,17 +324,40 @@ export class PlayerActor {
     void this.library.load(path).then((data) => {
       if (!data || this.currentModelPath !== path) return
       if (this.instance) {
-        this.root.remove(this.instance.root)
+        this.body.remove(this.instance.root)
         this.instance.dispose()
       }
       this.instance = new StudioInstance(data)
-      this.root.add(this.instance.root)
+      this.body.add(this.instance.root)
       this.fallback.visible = false
     })
   }
 
-  setLabelVisible(visible: boolean): void {
-    this.label.visible = visible
+  /**
+   * Shows the tag, holding it at a fixed size on screen.
+   *
+   * A sprite is measured in world units, so its apparent size falls off with
+   * distance like everything else. Scaling by the height the view spans at the
+   * player's distance cancels that out exactly.
+   */
+  updateLabel(camera: THREE.PerspectiveCamera, visible: boolean): void {
+    const distance = camera.position.distanceTo(this.root.position)
+    if (!visible || distance > TAG_MAX_DISTANCE) {
+      this.label.visible = false
+      return
+    }
+    this.label.visible = true
+
+    const viewHeight = 2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))
+    const scale = (TAG_SCREEN_FRACTION * viewHeight) / this.labelPixels.height
+    this.label.scale.set(this.labelPixels.width * scale, this.labelPixels.height * scale, 1)
+  }
+
+  /** Tints the model by the light where the player is standing. */
+  setLight(color: THREE.Color): void {
+    this.instance?.setLight(color)
+    this.weapon?.setLight(color)
+    ;(this.fallback.material as THREE.MeshLambertMaterial).color.copy(color).multiplyScalar(0.9)
   }
 
   dispose(): void {
@@ -327,30 +371,44 @@ export class PlayerActor {
 }
 
 function createNameTag(text: string, color: number): THREE.Sprite {
-  const canvas = document.createElement('canvas')
-  const scale = 2
-  const context = canvas.getContext('2d')!
-  context.font = `${14 * scale}px system-ui, sans-serif`
-  const width = Math.ceil(context.measureText(text).width) + 16 * scale
-  canvas.width = width
-  canvas.height = 24 * scale
+  // Rendered at 4x and scaled down on screen: the tag is held at a constant
+  // fraction of the viewport, so on a tall display it is drawn much larger
+  // than the CSS pixel size of the font and a 1x canvas shows every jaggy.
+  const scale = 4
+  const font = `600 ${14 * scale}px system-ui, -apple-system, "Segoe UI", sans-serif`
 
+  const measure = document.createElement('canvas').getContext('2d')!
+  measure.font = font
+  const width = Math.ceil(measure.measureText(text).width) + 14 * scale
+  const height = 22 * scale
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
   const ctx = canvas.getContext('2d')!
-  ctx.font = `${14 * scale}px system-ui, sans-serif`
+  ctx.font = font
   ctx.textBaseline = 'middle'
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
-  ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+  // A rounded plate rather than a hard rectangle, which at a constant screen
+  // size is a large flat block sitting over the match.
+  const radius = 6 * scale
+  ctx.fillStyle = 'rgba(8, 11, 16, 0.62)'
+  ctx.beginPath()
+  ctx.roundRect(0, 0, width, height, radius)
+  ctx.fill()
+
   ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`
-  ctx.fillText(text, 8 * scale, canvas.height / 2)
+  ctx.fillText(text, 7 * scale, height / 2)
 
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.SRGBColorSpace
-  // Depth-tested on purpose: a tag floating over a wall that hides its owner
-  // reads as "the player models are missing" rather than "they are behind that".
-  const sprite = new THREE.Sprite(
-    new THREE.SpriteMaterial({ map: texture, transparent: true })
-  )
-  sprite.scale.set(canvas.width / scale, canvas.height / scale, 1)
+  texture.minFilter = THREE.LinearMipmapLinearFilter
+  texture.generateMipmaps = true
+  texture.anisotropy = 4
+
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true }))
+  // Carries the canvas size; `updateLabel` rescales it every frame.
+  sprite.scale.set(width, height, 1)
   sprite.renderOrder = 10
   return sprite
 }

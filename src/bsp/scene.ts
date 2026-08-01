@@ -18,6 +18,21 @@ const INVISIBLE_TEXTURES = new Set([
 const isSky = (name: string): boolean => name.toLowerCase().startsWith('sky')
 
 /**
+ * Lightmap value treated as "ordinarily lit", i.e. a shading multiplier of 1.
+ * Measured across de_inferno at the feet of every player in the sample demo,
+ * the distribution is sharply bimodal — a median of 215 out in the sunlit
+ * streets against 35..69 in the fifth to twenty-fifth percentile indoors — so
+ * the open street is what a model's own skin brightness should correspond to.
+ */
+const LIGHT_REFERENCE = 215
+/** A player in deep shade stays readable; one in sunlight stops short of white. */
+const LIGHT_FLOOR = 0.45
+const LIGHT_CEILING = 1.15
+
+const shade = (texel: number): number =>
+  Math.min(Math.max(texel / LIGHT_REFERENCE, LIGHT_FLOOR), LIGHT_CEILING)
+
+/**
  * Vertex-shaded lightmapping: albedo modulated by the baked lightmap, with the
  * overbright factor GoldSrc applies so lit surfaces reach full white.
  */
@@ -54,6 +69,12 @@ export interface BuiltMap {
   bounds: THREE.Box3
   /** Adjusts the lighting multiplier applied to every surface. */
   setBrightness(value: number): void
+  /**
+   * Shading multiplier for a model standing at `point`, from the baked light
+   * of the floor beneath it. Returns null when nothing is below — outside the
+   * map, or mid-jump over a pit.
+   */
+  sampleLight(point: THREE.Vector3, out: THREE.Color): THREE.Color | null
   dispose(): void
 }
 
@@ -228,7 +249,13 @@ export function buildMapScene(bsp: Bsp): BuiltMap {
       },
       vertexShader: WORLD_VERTEX_SHADER,
       fragmentShader: WORLD_FRAGMENT_SHADER,
-      side: THREE.FrontSide
+      // Quake winds a front face clockwise; OpenGL calls that a back face.
+      // Measured on de_inferno, 9342 of 9347 faces are wound opposite their
+      // outward normal, so single-sided rendering makes it a coin-flip whether
+      // a surface you are looking at survives culling — and any that loses is
+      // a hole in the map. Drawing both sides costs some overdraw on a mesh of
+      // barely 13k triangles and guarantees the map matches the game.
+      side: THREE.DoubleSide
     })
     materials.push(material)
 
@@ -242,9 +269,66 @@ export function buildMapScene(bsp: Bsp): BuiltMap {
     console.warn(`${skippedLightmaps} faces exceeded the lightmap atlas and fell back to flat lighting`)
   }
 
+  // --- point lighting -------------------------------------------------------
+  //
+  // GoldSrc shades a studio model by the lightmap of the surface under it, not
+  // by scene lights, which is why a player walking into shadow goes dark. The
+  // same trick works here: drop a ray, find the floor, read the texel that the
+  // world shader would have used at that spot.
+  const raycaster = new THREE.Raycaster()
+  raycaster.far = 512
+  const DOWN = new THREE.Vector3(0, -1, 0)
+  const from = new THREE.Vector3()
+  const bary = new THREE.Vector3()
+  const triangle = new THREE.Triangle()
+
+  const sampleLight = (point: THREE.Vector3, out: THREE.Color): THREE.Color | null => {
+    // Start above the origin, which sits at the player's feet and can be a
+    // hair inside the floor.
+    from.copy(point).y += 24
+    raycaster.set(from, DOWN)
+    const hit = raycaster.intersectObject(root, true)[0]
+    if (!hit || !hit.face || !(hit.object instanceof THREE.Mesh)) return null
+
+    const lightmapUv = hit.object.geometry.getAttribute('lightmapUv')
+    const position = hit.object.geometry.getAttribute('position')
+    if (!lightmapUv || !position) return null
+
+    // Three reports which triangle was hit but interpolates only `uv`, so the
+    // lightmap coordinate has to be barycentrically weighted by hand.
+    const { a, b, c } = hit.face
+    triangle.set(
+      new THREE.Vector3().fromBufferAttribute(position, a),
+      new THREE.Vector3().fromBufferAttribute(position, b),
+      new THREE.Vector3().fromBufferAttribute(position, c)
+    )
+    if (!triangle.getBarycoord(hit.object.worldToLocal(hit.point.clone()), bary)) return null
+
+    const u = lightmapUv.getX(a) * bary.x + lightmapUv.getX(b) * bary.y + lightmapUv.getX(c) * bary.z
+    const v = lightmapUv.getY(a) * bary.x + lightmapUv.getY(b) * bary.y + lightmapUv.getY(c) * bary.z
+
+    const x = Math.min(Math.max(Math.round(u * atlas.size), 0), atlas.size - 1)
+    const y = Math.min(Math.max(Math.round(v * atlas.size), 0), atlas.size - 1)
+    const at = (y * atlas.size + x) * 4
+    // Expressed relative to a normally-lit surface rather than as a raw
+    // fraction. The world shader multiplies its lightmap in gamma space while
+    // models are lit in linear space by three, so the engine's overbright does
+    // not carry across — reusing it washes every player out to a pale ghost.
+    // Anchoring on the mid-tone instead keeps a model's own skin brightness
+    // where the map is ordinarily lit, and only real shade or real sunlight
+    // moves it. The clamp stops a black corner erasing a player altogether.
+    out.setRGB(
+      shade(atlas.pixels[at]),
+      shade(atlas.pixels[at + 1]),
+      shade(atlas.pixels[at + 2])
+    )
+    return out
+  }
+
   return {
     root,
     bounds,
+    sampleLight,
     setBrightness(value: number) {
       for (const material of materials) material.uniforms.brightness.value = value
     },

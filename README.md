@@ -48,8 +48,8 @@ with a browser.
 |---|---|
 | 🎥 **Third-person camera** | Chase camera behind any player, with mouse orbit and zoom, kept out of geometry by the engine's own hull tracing. |
 | 👁 **Two more views** | First-person down the player's aim, and a detached free-fly camera. |
-| 🗺 **The actual map** | The `.bsp` rendered with its own textures, **baked lightmaps** and skybox. |
-| 🧍 **The actual player models** | Half-Life studio models, GPU-skinned: legs on the walk cycle, torso on the aiming animation, interpolated between keyframes. |
+| 🗺 **The actual map** | The `.bsp` rendered with its own textures, **baked lightmaps** and skybox, drawn double-sided so Quake's winding never culls a surface away. |
+| 🧍 **The actual player models** | Half-Life studio models, GPU-skinned: legs on the walk cycle, torso on the aiming animation, interpolated between keyframes, and lit by the lightmap of the floor they stand on — so a player in a doorway goes dark like the doorway. |
 | 🔫 **The weapon they were holding** | The `p_*.mdl` bone-merged onto the player's arm, exactly as GoldSrc does it — so the gun tracks the hand through every reload. |
 | 🔊 **Sound** | Gunfire, footsteps, reloads, hits and deaths, positioned in the world and panned from the camera. |
 | ⏯ **Full transport** | Play/pause, scrub, 0.25×–8× speed, jump between players. |
@@ -435,6 +435,11 @@ which now pulls `gfx/env/<skyname>*` alongside the map.
 - **Radio calls and map ambience are silent.** Radio is a `SendAudio` user message rather
   than a sound cue, and ambience arrives as `svc_spawnstaticsound`, which nothing handles.
   Sentences (`!DOOR_OPEN`) index a phoneme script and are skipped.
+- **Brush entities ignore their render mode.** Glass, grates and water are drawn fully
+  opaque: faces are batched by texture across the whole map, so a per-entity `rendermode`
+  and `renderamt` have nowhere to attach without splitting those batches. Lightstyles
+  (flickering lamps) and animated `+0`/`+1` texture pairs are likewise static — the first
+  style and the first frame.
 - **No muzzle flashes, grenades or bomb entities.** Non-player entities are decoded but
   not sampled or drawn — `recordSample` in `src/demo/replay.ts` is the place to extend.
   Weapon *models* are drawn and audible; only the visual effects around them are missing.

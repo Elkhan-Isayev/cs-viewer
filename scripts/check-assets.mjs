@@ -60,6 +60,15 @@ for (const file of existsSync(mapsDir) ? readdirSync(mapsDir).filter((f) => f.en
   check('meshes built', meshes > 0, `${meshes} draw batches`)
   check('triangles built', triangles > 5000, `${triangles.toLocaleString()} triangles`)
 
+  // Every face is drawn double-sided because Quake winds a front face
+  // clockwise, the opposite of OpenGL. If this reverts to FrontSide, culling
+  // silently eats surfaces and the map fills with holes.
+  let singleSided = 0
+  built.root.traverse((object) => {
+    if (object instanceof THREE.Mesh && object.material.side !== THREE.DoubleSide) singleSided++
+  })
+  check('world faces are drawn from both sides', singleSided === 0, `${singleSided} single-sided batches`)
+
   const size = built.bounds.getSize(new THREE.Vector3())
   check(
     'bounds plausible',
@@ -238,6 +247,43 @@ if (existsSync(demo)) {
     flash.distanceTo(grip) > 1,
     `muzzle sits ${flash.distanceTo(grip).toFixed(1)} units from the grip`
   )
+
+  // Players are lit by the lightmap of the floor under them, which needs a
+  // downward raycast to land. Backface culling used to swallow every one of
+  // these, leaving all fourteen players lit by a constant.
+  console.log('\nlighting against demo.dem')
+  const built = buildMapScene(parseBsp(new Uint8Array(readFileSync(join(assets, 'maps', `${replay.mapName}.bsp`)))))
+  built.root.updateMatrixWorld(true)
+  const colour = new THREE.Color()
+  const levels = []
+  let noFloor = 0
+  for (let t = 60; t < 3000; t += 17) {
+    for (const player of replay.players) {
+      if (!samplePlayer(player, t, pose).present) continue
+      const lit = built.sampleLight(pose.position, colour)
+      if (!lit) { noFloor++; continue }
+      levels.push((lit.r + lit.g + lit.b) / 3)
+    }
+  }
+  check(
+    'the floor is found beneath players',
+    noFloor / (levels.length + noFloor) < 0.05,
+    `${noFloor} of ${levels.length + noFloor} samples had nothing below`
+  )
+  levels.sort((a, b) => a - b)
+  const spread = levels[Math.floor(levels.length * 0.95)] - levels[Math.floor(levels.length * 0.05)]
+  check(
+    'light varies between sun and shade',
+    spread > 0.3,
+    `p05 ${levels[Math.floor(levels.length * 0.05)].toFixed(2)} to p95 ${levels[Math.floor(levels.length * 0.95)].toFixed(2)}`
+  )
+  built.dispose()
+
+  // Orbiting must not reach straight down: overhead puts the camera through
+  // the ceiling of every covered street and lays standing players on their side.
+  rig.mode = 'third-person'
+  for (let i = 0; i < 200; i++) rig.orbit(0, -0.1)
+  check('orbit stops short of overhead', rig.orbitPitch <= 1.0 + 1e-9, `clamped at ${rig.orbitPitch.toFixed(2)} rad`)
 
   console.log('\nsound against demo.dem')
   const cues = replay.sounds

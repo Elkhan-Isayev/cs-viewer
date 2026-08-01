@@ -47,6 +47,9 @@ export class Viewer {
 
   /** Replay time at which the followed player went missing, if they have. */
   private followAbsentSince: number | null = null
+  /** Round-robin position for per-player relighting. */
+  private relightCursor = 0
+  private readonly lightScratch = new THREE.Color()
 
   private lastFrameAt = performance.now()
   private running = false
@@ -65,10 +68,11 @@ export class Viewer {
     this.scene.background = new THREE.Color(0x0b0e13)
     this.scene.fog = new THREE.Fog(0x0b0e13, 3000, 9000)
 
-    // The map carries baked lighting; players need a little of their own so
-    // they do not read as silhouettes.
-    this.scene.add(new THREE.AmbientLight(0xffffff, 1.6))
-    const key = new THREE.DirectionalLight(0xffffff, 1.1)
+    // Players are tinted by the map's own lightmap where they stand, so these
+    // only shape the model — they must average out near 1, or the baked light
+    // is multiplied twice and every figure blows out to white.
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.75))
+    const key = new THREE.DirectionalLight(0xffffff, 0.5)
     key.position.set(0.4, 1, 0.25)
     this.scene.add(key)
 
@@ -174,6 +178,26 @@ export class Viewer {
   }
 
   /**
+   * Relights one player per frame, round-robin.
+   *
+   * Each sample is a raycast against the whole map, so doing all fourteen every
+   * frame would cost more than drawing them. Spread out, a full team refreshes
+   * several times a second — far quicker than anyone crosses a shadow.
+   */
+  private relightOnePlayer(present: number[]): void {
+    if (!this.map || present.length === 0) return
+    this.relightCursor = (this.relightCursor + 1) % present.length
+    const actor = this.actors.get(present[this.relightCursor])
+    if (!actor) return
+
+    const light = this.map.sampleLight(actor.root.position, this.lightScratch)
+    // Nothing underneath — mid-jump, or over a gap. Keep the last value rather
+    // than flashing the model to black.
+    if (!light) return
+    actor.setLight(light)
+  }
+
+  /**
    * Chooses who to watch when the followed player is gone. Staying on their
    * team keeps the thread of the round; failing that, anyone still alive.
    */
@@ -218,8 +242,8 @@ export class Viewer {
 
     for (const [slot, actor] of this.actors) {
       const pose = samplePlayer(actor.player, time, this.pose)
-      actor.setLabelVisible(this.showNameTags && slot !== this.followSlot)
       actor.update(pose, delta)
+      actor.updateLabel(this.rig.camera, this.showNameTags && slot !== this.followSlot)
       if (pose.present) present.push(slot)
 
       if (slot === this.followSlot && pose.present) {
@@ -254,6 +278,8 @@ export class Viewer {
         }
       }
     }
+
+    this.relightOnePlayer(present)
 
     // In eye mode the followed player's own model would fill the screen.
     const followed = this.followSlot !== null ? this.actors.get(this.followSlot) : undefined

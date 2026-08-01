@@ -162,6 +162,9 @@ function createMaterial(mdl: Mdl, textureIndex: number): THREE.Material {
   map.minFilter = THREE.LinearMipmapLinearFilter
   map.magFilter = THREE.LinearFilter
   map.generateMipmaps = true
+  // Player skins are low resolution and almost always seen at a grazing angle,
+  // where trilinear alone smears them into mush.
+  map.anisotropy = 4
   map.colorSpace = THREE.SRGBColorSpace
   map.needsUpdate = true
 
@@ -191,6 +194,7 @@ export class StudioInstance {
    */
   readonly boneByName = new Map<string, THREE.Bone>()
   private readonly bones: THREE.Bone[]
+  private readonly materials: THREE.Material[]
   private readonly data: StudioModelData
   /** True for bones the upper-body sequence drives. */
   private readonly isTorso: boolean[]
@@ -221,7 +225,10 @@ export class StudioInstance {
       else if (bone.parent >= 0 && this.isTorso[bone.parent]) this.isTorso[i] = true
     })
 
-    this.mesh = new THREE.SkinnedMesh(data.geometry, data.materials)
+    // Cloned so each player can be tinted by the light where they stand;
+    // `data` is shared by every instance of the same model.
+    this.materials = data.materials.map((material) => material.clone())
+    this.mesh = new THREE.SkinnedMesh(data.geometry, this.materials)
     this.mesh.frustumCulled = false
 
     const roots = this.bones.filter((_, i) => mdl.bones[i].parent < 0)
@@ -325,7 +332,16 @@ export class StudioInstance {
     target.quaternion.copy(this.quaternion)
   }
 
+  /** Sets the light this model sits in; GoldSrc lights studio models by point. */
+  setLight(color: THREE.Color): void {
+    for (const material of this.materials) {
+      const tinted = material as THREE.MeshLambertMaterial
+      if (tinted.color) tinted.color.copy(color)
+    }
+  }
+
   dispose(): void {
     this.mesh.skeleton?.dispose()
+    for (const material of this.materials) material.dispose()
   }
 }

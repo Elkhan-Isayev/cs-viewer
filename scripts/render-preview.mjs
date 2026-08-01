@@ -452,7 +452,10 @@ for (const player of replay.players) {
   if (weapon) holder.add(weapon.root)
   holder.updateMatrixWorld(true)
 
-  const tint = HIGHLIGHT && player.slot === subject.slot ? [1.0, 0.78, 0.3] : null
+  // Match the browser: models take the baked light of the floor beneath them.
+  const lit = map.sampleLight(p.position, new THREE.Color())
+  const light = lit ? [lit.r, lit.g, lit.b] : [1, 1, 1]
+  const tint = HIGHLIGHT && player.slot === subject.slot ? [1.0, 0.78, 0.3] : light
   playerTriangles += rasteriseStudio(data, instance, tint)
   if (weapon && weaponData) playerTriangles += rasteriseStudio(weaponData, weapon, tint)
   drawnPlayers++
@@ -484,7 +487,7 @@ function rasteriseStudio(data, instance, tint) {
     }
     clips[v] = toClip(world.x, world.y, world.z)
     // Matches the scene's ambient + single directional light.
-    shades[v] = 0.62 + 0.45 * Math.max(worldNormal.dot(KEY_LIGHT), 0)
+    shades[v] = 0.75 + 0.5 * Math.max(worldNormal.dot(KEY_LIGHT), 0)
   }
 
   const groups = geometry.groups.length

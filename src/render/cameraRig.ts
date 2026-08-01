@@ -7,8 +7,26 @@ import { PLAYER_VIEW_HEIGHT } from './coords.ts'
  */
 export type LineOfSight = (from: THREE.Vector3, to: THREE.Vector3) => number
 
-/** Closest the chase camera may be pulled in, as a fraction of its distance. */
-const MIN_CHASE_FRACTION = 0.3
+/**
+ * How far short of an obstruction the camera stops, in world units. Landing
+ * exactly on the surface puts the near plane inside it, which fills the screen
+ * with one magnified texel of whatever was hit.
+ */
+const WALL_MARGIN = 12
+
+/**
+ * Closest the camera may sit to its subject. Nearer than this and the chase
+ * view is inside the player's own model.
+ */
+const MIN_CHASE_DISTANCE = 28
+
+/**
+ * Orbit limits. The upper bound stops short of overhead on purpose: looking
+ * straight down puts the camera in the ceiling of every covered street, and a
+ * top-down view of a standing player reads as a figure lying on its side.
+ */
+const MIN_ORBIT_PITCH = -0.5
+const MAX_ORBIT_PITCH = 1.0
 
 export type CameraMode = 'third-person' | 'eye' | 'free'
 
@@ -108,7 +126,7 @@ export class CameraRig {
 
   orbit(deltaYaw: number, deltaPitch: number): void {
     this.orbitYaw -= deltaYaw
-    this.orbitPitch = THREE.MathUtils.clamp(this.orbitPitch - deltaPitch, -1.2, 1.35)
+    this.orbitPitch = THREE.MathUtils.clamp(this.orbitPitch - deltaPitch, MIN_ORBIT_PITCH, MAX_ORBIT_PITCH)
   }
 
   zoom(amount: number): void {
@@ -175,10 +193,14 @@ export class CameraRig {
     // disable collision entirely — dropping the camera outside the room.
     if (this.lineOfSight) {
       const clear = this.lineOfSight(this.smoothedTarget, this.desired)
-      // Keep a floor on the pull-in; jamming the camera into the player's head
-      // is worse than letting a corner clip the very edge of the view.
       if (clear < 1) {
-        this.desired.lerpVectors(this.smoothedTarget, this.desired, Math.max(clear, MIN_CHASE_FRACTION))
+        // Stop a fixed margin short of what was hit rather than at a fraction
+        // of the way there. A fraction leaves the camera further inside the
+        // wall the closer the obstruction is, which is how a hard orbit used
+        // to bury the view in a magnified floor texture.
+        const reach = this.smoothedTarget.distanceTo(this.desired)
+        const stop = Math.max(reach * clear - WALL_MARGIN, MIN_CHASE_DISTANCE)
+        this.desired.lerpVectors(this.smoothedTarget, this.desired, Math.min(stop / reach, 1))
       }
     }
 
