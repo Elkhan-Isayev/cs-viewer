@@ -435,7 +435,8 @@ for (const player of replay.players) {
   const sequences = instance.sequenceInfo
   const sequence = Math.max(0, Math.min(Math.round(p.sequence), sequences.length - 1))
   const frameCount = sequences[sequence]?.frameCount ?? 1
-  instance.applyPose(sequence, (p.frame / 256) * Math.max(frameCount - 1, 0), 0, 0)
+  const BLEND = option('--blend', null)
+  instance.applyPose(sequence, (p.frame / 256) * Math.max(frameCount - 1, 0), 0, 0, BLEND === null ? p.blend : Number(BLEND))
 
   // The weapon in hand: a `p_*.mdl` posed by bone-merging onto the player.
   const weaponPath = replay.models.get(p.weaponModelIndex)

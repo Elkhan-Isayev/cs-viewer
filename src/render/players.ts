@@ -3,6 +3,7 @@ import { buildStudioModel, StudioInstance, type StudioModelData } from '../mdl/m
 import {
   PLAYER_STRIDE,
   P_FRAME,
+  P_BLEND,
   P_GAIT,
   P_MODEL,
   P_PITCH,
@@ -58,6 +59,8 @@ export interface PlayerPose {
   sequence: number
   frame: number
   gaitSequence: number
+  /** Position along the aim sequence's blend axis, 0..1. */
+  blend: number
   modelIndex: number
   weaponModelIndex: number
 }
@@ -126,6 +129,14 @@ export function samplePlayer(player: ReplayPlayer, time: number, out: PlayerPose
     ? lerpWrapped(track.data[base + P_FRAME], hasNext ? track.data[next + P_FRAME] : track.data[base + P_FRAME], alpha, 256)
     : track.data[base + P_FRAME]
   out.gaitSequence = track.data[base + P_GAIT]
+  // `blending[0]` is where the player is looking along the aim sequence's
+  // pitch axis, 0..255 on the wire.
+  out.blend = lerpWrapped(
+    track.data[base + P_BLEND],
+    hasNext ? track.data[next + P_BLEND] : track.data[base + P_BLEND],
+    alpha,
+    256
+  ) / 255
   out.modelIndex = track.data[base + P_MODEL]
   out.weaponModelIndex = track.data[base + P_WEAPON_MODEL]
   out.present = true
@@ -153,6 +164,7 @@ export function createPose(): PlayerPose {
     sequence: 0,
     frame: 0,
     gaitSequence: 0,
+    blend: 0.5,
     modelIndex: 0,
     weaponModelIndex: 0
   }
@@ -220,14 +232,29 @@ export class PlayerActor {
     this.label.position.set(0, TAG_HEIGHT, 0)
     this.root.add(this.label)
 
-    // Shown until the real model arrives, and if it never does.
+    // Shown until a model arrives, and if none ever does. Centred on the
+    // origin, not raised: a player's origin is the middle of their hull, and
+    // the studio model straddles it too — measured at -36.8..26.4 in its own
+    // frame. Sitting it 36 higher left a capsule floating a body above the
+    // ground.
     this.fallback = new THREE.Mesh(
-      new THREE.CapsuleGeometry(16, 40, 4, 8),
+      new THREE.CapsuleGeometry(14, 34, 4, 8),
       new THREE.MeshLambertMaterial({ color: TEAM_COLORS[player.team] ?? TEAM_COLORS[0] })
     )
-    this.fallback.position.y = 36
     this.root.add(this.fallback)
     this.root.visible = false
+  }
+
+  /**
+   * The model named in the player's connect-time userinfo.
+   *
+   * Used when the entity's `modelindex` has not arrived yet, which happens for
+   * anyone still unassigned at the start of a round. Without it they spend
+   * that time as a coloured capsule.
+   */
+  private userinfoModel(): string | null {
+    const name = this.player.model
+    return name ? `models/player/${name}/${name}.mdl` : null
   }
 
   /** Team at `time`, preferring the model actually worn in that frame. */
@@ -259,7 +286,7 @@ export class PlayerActor {
     // and running read correctly.
     this.gaitPhase += delta * (pose.speed / 100) * 12
     const studio = this.studioFrames(instance, pose)
-    instance.applyPose(studio.sequence, studio.frame, studio.gaitSequence, studio.gaitFrame)
+    instance.applyPose(studio.sequence, studio.frame, studio.gaitSequence, studio.gaitFrame, pose.blend)
 
     // The gun must be posed after the player, since it rides those bones.
     this.ensureWeapon(pose.weaponModelIndex)
@@ -317,7 +344,7 @@ export class PlayerActor {
   }
 
   private ensureModel(modelIndex: number): void {
-    const path = this.replay.models.get(modelIndex)
+    const path = this.replay.models.get(modelIndex) ?? this.userinfoModel()
     if (!path || path === this.currentModelPath) return
     this.currentModelPath = path
 

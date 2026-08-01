@@ -1,5 +1,13 @@
 import * as THREE from 'three'
-import { parseMdl, readAnimChannel, STUDIO_NF_ADDITIVE, STUDIO_NF_CHROME, STUDIO_NF_MASKED, type Mdl } from './parser.ts'
+import {
+  parseMdl,
+  readAnimChannel,
+  STUDIO_NF_ADDITIVE,
+  STUDIO_NF_CHROME,
+  STUDIO_NF_MASKED,
+  type Mdl,
+  type MdlSequence
+} from './parser.ts'
 
 /**
  * Turns a parsed studio model into a Three.js `SkinnedMesh` and evaluates its
@@ -254,8 +262,11 @@ export class StudioInstance {
    * @param frame         frame within that sequence
    * @param gaitSequence  lower-body sequence index (idle, walk, run)
    * @param gaitFrame     frame within the gait sequence
+   * @param blend         0..1 along the sequence's blend axis; for a player's
+   *                      aim sequences this is where they are looking, from
+   *                      fully down to fully up
    */
-  applyPose(sequence: number, frame: number, gaitSequence: number, gaitFrame: number): void {
+  applyPose(sequence: number, frame: number, gaitSequence: number, gaitFrame: number, blend = 0.5): void {
     const { mdl } = this.data
     const upper = mdl.sequences[sequence] ?? mdl.sequences[0]
     const lower = mdl.sequences[gaitSequence] ?? upper
@@ -264,7 +275,8 @@ export class StudioInstance {
       const useGait = !this.isTorso[i] && lower !== undefined && gaitSequence > 0
       const active = useGait ? lower : upper
       const activeFrame = useGait ? gaitFrame : frame
-      this.poseBone(i, active, activeFrame)
+      // Locomotion has one blend; only the aim sequences span an axis.
+      this.poseBone(i, active, activeFrame, useGait ? 0.5 : blend)
     }
   }
 
@@ -292,35 +304,65 @@ export class StudioInstance {
         this.bones[i].position.copy(shared.position)
         this.bones[i].quaternion.copy(shared.quaternion)
       } else {
-        this.poseBone(i, idle, 0)
+        this.poseBone(i, idle, 0, 0.5)
       }
     }
   }
 
-  private poseBone(boneIndex: number, sequence: { animOffset: number; frameCount: number } | undefined, frame: number): void {
+  private poseBone(
+    boneIndex: number,
+    sequence: MdlSequence | undefined,
+    frame: number,
+    blend: number
+  ): void {
     const bone = this.data.mdl.bones[boneIndex]
     const target = this.bones[boneIndex]
+    const bytes = this.data.mdl.bytes
+    const boneCount = this.data.mdl.bones.length
 
-    const values = [0, 0, 0, 0, 0, 0]
     // Studio clips run at 30-ish fps but the demo is played back at whatever
     // the display refreshes at, so land between keyframes and blend them.
     // Sampling only the floor makes every animation step visibly.
     const last = sequence ? sequence.frameCount - 1 : 0
     const whole = Math.min(Math.max(Math.floor(frame), 0), last)
     const nextWhole = Math.min(whole + 1, last)
-    const blend = Math.min(Math.max(frame - whole, 0), 1)
+    const frameBlend = Math.min(Math.max(frame - whole, 0), 1)
 
+    // Where along the blend axis this pose sits, and the two animations that
+    // bracket it. A player's aim sequences carry nine blends spanning the
+    // pitch they can look through, so reading only the first — as this used to
+    // — poses every torso at one extreme of that range no matter where they
+    // were actually aiming.
+    const blendCount = sequence ? Math.max(sequence.blendCount, 1) : 1
+    const axis = Math.min(Math.max(blend, 0), 1) * (blendCount - 1)
+    const lowBlend = Math.floor(axis)
+    const highBlend = Math.min(lowBlend + 1, blendCount - 1)
+    const axisBlend = axis - lowBlend
+
+    const channelAt = (animBase: number, channel: number): number | null => {
+      const a = readAnimChannel(bytes, animBase, boneIndex, channel, whole)
+      if (a === null) return null
+      if (nextWhole === whole) return a
+      const b = readAnimChannel(bytes, animBase, boneIndex, channel, nextWhole) ?? a
+      return a + (b - a) * frameBlend
+    }
+
+    const values = [0, 0, 0, 0, 0, 0]
     for (let channel = 0; channel < 6; channel++) {
       let value = bone.value[channel]
       if (sequence && sequence.frameCount > 0) {
-        const a = readAnimChannel(this.data.mdl.bytes, sequence.animOffset, boneIndex, channel, whole)
-        if (a !== null) {
-          const b = nextWhole === whole
-            ? a
-            : readAnimChannel(this.data.mdl.bytes, sequence.animOffset, boneIndex, channel, nextWhole) ?? a
-          // Rotations are stored as raw Euler steps; over one frame they never
-          // approach a wrap, so a plain lerp is safe and much cheaper than slerp.
-          value += (a + (b - a) * blend) * bone.scale[channel]
+        const lowBase = sequence.animOffset + lowBlend * boneCount * 12
+        const low = channelAt(lowBase, channel)
+        if (low !== null) {
+          let amount = low
+          if (highBlend !== lowBlend) {
+            const highBase = sequence.animOffset + highBlend * boneCount * 12
+            const high = channelAt(highBase, channel) ?? low
+            // Rotations are stored as raw Euler steps; across one blend step
+            // they never approach a wrap, so a plain lerp is safe.
+            amount = low + (high - low) * axisBlend
+          }
+          value += amount * bone.scale[channel]
         }
       }
       values[channel] = value

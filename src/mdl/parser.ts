@@ -19,9 +19,16 @@ export interface MdlSequence {
   fps: number
   flags: number
   frameCount: number
-  /** Per-bone RLE animation channels for blend 0. */
+  /**
+   * Per-bone RLE animation channels. The lump holds `blendCount * boneCount`
+   * of them, blend-major, so blend `b` for bone `i` starts at
+   * `animOffset + (b * boneCount + i) * 12`.
+   */
   animOffset: number
   blendCount: number
+  /** Range the blend axis spans; for player aim sequences, degrees of pitch. */
+  blendStart: number
+  blendEnd: number
   /** Straight-line motion the animation itself carries, in model space. */
   linearMovement: [number, number, number]
 }
@@ -141,7 +148,15 @@ export function parseMdl(bytes: Uint8Array): Mdl {
     s.skip(24) // bounding box
     const blendCount = s.i32()
     const animOffset = s.i32()
-    sequences.push({ label, fps, flags, frameCount, animOffset, blendCount, linearMovement })
+    s.skip(8) // blend types
+    // The range of the blend axis, in whatever unit `blendtype` names — for a
+    // player's aim sequences that is the pitch the nine blends span.
+    const blendStart = s.f32()
+    s.skip(4) // blendstart[1]
+    const blendEnd = s.f32()
+    sequences.push({
+      label, fps, flags, frameCount, animOffset, blendCount, blendStart, blendEnd, linearMovement
+    })
   }
 
   // --- body parts, sub-models and meshes ---

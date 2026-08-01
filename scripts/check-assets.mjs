@@ -251,6 +251,61 @@ if (existsSync(demo)) {
   // Players are lit by the lightmap of the floor under them, which needs a
   // downward raycast to land. Backface culling used to swallow every one of
   // these, leaving all fourteen players lit by a constant.
+  // A player's aim sequences carry a blend axis for where they are looking.
+  // Reading only the first blend — as this used to — poses every torso at one
+  // extreme of it, which is a permanently hunched, twisted figure.
+  console.log('\naim blending against demo.dem')
+  const terror = parseMdl(new Uint8Array(readFileSync(join(assets, 'models/player/terror/terror.mdl'))))
+  const aim = terror.sequences.filter((s) => s.label.startsWith('ref_aim_'))
+  check(
+    'aim sequences span a blend axis',
+    aim.length > 0 && aim.every((s) => s.blendCount > 1),
+    `${aim.length} aim sequences, ${aim[0]?.blendCount} blends each`
+  )
+
+  const { P_BLEND } = await import('../src/demo/replay.ts')
+  let levelish = 0, blendSamples = 0
+  const steepDown = [], steepUp = []
+  for (const player of replay.players) {
+    for (let i = 0; i < player.track.count; i += 7) {
+      const blend = player.track.data[i * PLAYER_STRIDE + P_BLEND]
+      const pitch = player.track.data[i * PLAYER_STRIDE + P_PITCH]
+      blendSamples++
+      if (Math.abs(blend - 128) < 32) levelish++
+      if (pitch > 25) steepDown.push(blend)
+      else if (pitch < -25) steepUp.push(blend)
+    }
+  }
+  const avg = (a) => a.reduce((s, v) => s + v, 0) / a.length
+  check(
+    'the blend axis centres on a level aim',
+    levelish / blendSamples > 0.3,
+    `${((100 * levelish) / blendSamples).toFixed(0)}% of samples sit near 128 of 255`
+  )
+  // Pins which end of the axis is which: blend 0 is aiming fully up.
+  check(
+    'looking down runs up the blend axis',
+    steepDown.length > 0 && steepUp.length > 0 && avg(steepDown) > avg(steepUp),
+    `down ${avg(steepDown).toFixed(0)} vs up ${avg(steepUp).toFixed(0)} of 255`
+  )
+
+  // Anyone still unassigned at a round start has no `modelindex` yet, and
+  // without a fallback spends that time as a coloured capsule.
+  const named = replay.players.filter((p) => p.model)
+  check(
+    'players name a model in their userinfo',
+    named.length === replay.players.length,
+    `${named.length}/${replay.players.length}, e.g. "${replay.players[0].model}"`
+  )
+  const missingFallback = [...new Set(named.map((p) => p.model))].filter(
+    (m) => !existsSync(join(assets, 'models', 'player', m, `${m}.mdl`))
+  )
+  check(
+    'every userinfo model is on disk',
+    missingFallback.length === 0,
+    missingFallback.length ? missingFallback.join(', ') : 'all fallbacks resolve'
+  )
+
   console.log('\nlighting against demo.dem')
   const built = buildMapScene(parseBsp(new Uint8Array(readFileSync(join(assets, 'maps', `${replay.mapName}.bsp`)))))
   built.root.updateMatrixWorld(true)
