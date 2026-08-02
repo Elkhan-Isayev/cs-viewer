@@ -247,7 +247,33 @@ Downloads the example recording (49 MB) into `public/demos/demo.dem`. It is also
 npm run dev
 ```
 
-Open **http://localhost:5180**.
+Open **http://localhost:5180**. Vite also prints a `Network:` address on your LAN, so the
+same replay opens on a phone or another machine without any further setup.
+
+Stop it with **Ctrl-C** in that terminal. To leave it running and get the prompt back:
+
+```bash
+npm run dev > /tmp/cs-viewer.log 2>&1 &   # start detached
+tail -f /tmp/cs-viewer.log                # watch it (Ctrl-C just stops watching)
+pkill -f vite                             # stop it
+```
+
+Port 5180 is set in `vite.config.ts`; pass `-- --port 3000` to override it once. If the
+page loads but the map does not, the console names the command to run — almost always a
+missing map in step 2.
+
+### Everything else you can run
+
+| | |
+|---|---|
+| `npm run dev` | the viewer, with hot reload |
+| `npm run check` | headless assertions over the maps, models, camera, lighting and sound — no GPU needed |
+| `npm run still` | render a frame to a PNG through the real pipeline (`-- --time 305 --player 1 --out shot.png`) |
+| `npm run inspect` | summarise a demo in the terminal: map, players, kills, rounds |
+| `npm run assets` | extract maps, models and sounds from your game files |
+| `npm run build` | the standalone site into `dist/` |
+| `npm run build:lib` | the embeddable module into `dist-lib/` |
+| `npm run preview` | serve the built `dist/` as it would be in production |
 
 ### 5. Watch
 
